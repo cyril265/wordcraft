@@ -1039,6 +1039,136 @@ fn a_paragraph_moved_below_a_floating_table_or_shape_keeps_its_space_before_ther
     assert!((top(&l, 0, 2) - 97.0).abs() < 0.01, "{}", top(&l, 0, 2));
 }
 
+/// A document laid out like the ones measured in Word: an A4 page with margins of 70.9 pt left,
+/// 56.7 right and 28.35 top, compatibility mode `mode`, `text` after floating table `t`.
+fn word_page(mode: u32, text: &str, t: Table) -> Document {
+    let mut d = doc_with_table(text, 0, t);
+    d.settings.compat_mode = mode;
+    let s = &mut d.last_section;
+    (s.page_w, s.page_h, s.margin_left, s.margin_right, s.margin_top) = (595.3, 841.9, 70.9, 56.7, 28.35);
+    d
+}
+
+/// A one-cell floating table 150 pt wide and 20 pt high placed by `float`, with no style, cell
+/// margins `margins` (left, right) and, when `border` isn't 0, borders that wide.
+fn plain_table(margins: (f32, f32), border: f32, float: TableFloat) -> Table {
+    use wordcraft_doc::props::{Border, BorderStyle, Borders};
+    let mut t = float_table(150.0, 20.0, float);
+    t.props.style = None;
+    t.props.cell_margins = Some([0.0, margins.0, 0.0, margins.1]);
+    let line = (border > 0.0).then_some(Border { style: BorderStyle::Single, width: border, color: None, space: 0.0 });
+    t.props.borders = Some(wordcraft_doc::props::Borders { top: line, left: line, bottom: line, right: line, ..Borders::default() });
+    t
+}
+
+#[test]
+fn a_floating_table_stands_across_the_page_where_word_puts_it() {
+    // Word, a 150 pt table 50 pt down, its cells' left edge (the middle of a border, or a cell's
+    // shading): before Word 2013 layout an offset or a left or right alignment places the text
+    // of the outer cells, so the cell edges stand their cell margins further out, and centring
+    // centres the text between them; in Word 2013 layout it places the outer edges of the
+    // borders. Word's positions vary by up to a quarter point between anchors.
+    let x = |mode: u32, margins: (f32, f32), border: f32, h_rel: Anchor, x: f32, h_align: Option<FloatAlign>| {
+        let float = TableFloat { h_rel, x, h_align, ..on_page(50.0) };
+        table_rect(&lay(&word_page(mode, "After", plain_table(margins, border, float))), 0, 0).unwrap().x
+    };
+    let (start, center, end) = (Some(FloatAlign::Start), Some(FloatAlign::Center), Some(FloatAlign::End));
+    let (inside, outside) = (Some(FloatAlign::Inside), Some(FloatAlign::Outside));
+    let cases = [
+        // Word 2007 layout, 5.4 pt cell margins (Normal Table's), a 0.5 pt border.
+        (12, (5.4, 5.4), 0.5, Anchor::Page, 70.9, None, 65.3),
+        (12, (5.4, 5.4), 0.5, Anchor::Margin, 50.0, None, 115.3),
+        (12, (5.4, 5.4), 0.5, Anchor::Margin, 0.0, start, 65.5),
+        (12, (5.4, 5.4), 0.5, Anchor::Margin, 0.0, inside, 65.5),
+        (12, (5.4, 5.4), 0.5, Anchor::Margin, 0.0, center, 229.8),
+        (12, (5.4, 5.4), 0.5, Anchor::Margin, 0.0, end, 394.2),
+        (12, (5.4, 5.4), 0.5, Anchor::Margin, 0.0, outside, 394.2),
+        (12, (5.4, 5.4), 0.5, Anchor::Page, 0.0, end, 450.7),
+        // ... 15 pt left and 5 pt right (`w:tblCellMar` or `w:tcMar`).
+        (12, (15.0, 5.0), 0.5, Anchor::Margin, 0.0, start, 56.0),
+        (12, (15.0, 5.0), 0.5, Anchor::Margin, 0.0, center, 224.8),
+        (12, (15.0, 5.0), 0.5, Anchor::Margin, 0.0, end, 393.7),
+        // ... the 0.5 pt Word gives a table without a default table style; no border.
+        (12, (0.5, 0.5), 0.0, Anchor::Page, 70.9, None, 70.3),
+        (12, (0.5, 0.5), 0.0, Anchor::Margin, 0.0, end, 389.2),
+        // Word 2013 layout: a 3 pt border, half of it inside the placed edge; none.
+        (15, (5.4, 5.4), 3.0, Anchor::Page, 70.9, None, 72.3),
+        (15, (5.4, 5.4), 3.0, Anchor::Margin, 0.0, start, 72.5),
+        (15, (5.4, 5.4), 3.0, Anchor::Margin, 0.0, center, 229.8),
+        (15, (5.4, 5.4), 3.0, Anchor::Margin, 0.0, end, 387.2),
+        (15, (0.5, 0.5), 0.0, Anchor::Page, 70.9, None, 70.8),
+    ];
+    for (mode, margins, border, h_rel, offset, align, word) in cases {
+        let got = x(mode, margins, border, h_rel, offset, align);
+        assert!((got - word).abs() < 0.3, "mode {mode}, margins {margins:?}, border {border}, {h_rel:?} {offset} {align:?}: {got}, Word {word}");
+    }
+}
+
+#[test]
+fn outer_cells_overriding_only_some_margins_place_a_floating_table_like_the_same_margins_in_full() {
+    // A cell's `w:tcMar` naming only some sides takes the others from the table (5.4 pt here).
+    // Before Word 2013 layout the outer cells' margins place the table: the first cell's left
+    // margin of 15 pt puts the cell edge 15 pt left of an offset of 150 (135), the last cell's
+    // right margin of 15 pt puts it 15 pt past the margin when aligned right (553.6 of a 150 pt
+    // table: 403.6); the first cell's right margin (9 pt, between the cells) doesn't count. In
+    // Word 2013 layout the margins don't place it (150; 388.6).
+    use wordcraft_doc::props::HeightRule;
+    let end = Some(FloatAlign::End);
+    for (mode, h_rel, offset, align, want) in [
+        (12, Anchor::Page, 150.0, None, 135.0),
+        (12, Anchor::Margin, 0.0, end, 403.6),
+        (15, Anchor::Page, 150.0, None, 150.0),
+        (15, Anchor::Margin, 0.0, end, 388.6),
+    ] {
+        let placed = |partial: bool| {
+            let mut t = Table::new(1, 2, 150.0);
+            t.rows[0].props.height = Some(20.0);
+            t.rows[0].props.height_rule = HeightRule::Exact;
+            t.props.float = Some(TableFloat { h_rel, x: offset, h_align: align, ..on_page(50.0) });
+            t.props.style = None;
+            t.props.cell_margins = Some([0.0, 5.4, 0.0, 5.4]);
+            let (first, last) = t.rows[0].cells.split_at_mut(1);
+            if partial {
+                first[0].props.partial_margins = Some([None, Some(15.0), None, Some(9.0)]);
+                last[0].props.partial_margins = Some([None, None, None, Some(15.0)]);
+            } else {
+                first[0].props.margins = Some([0.0, 15.0, 0.0, 9.0]);
+                last[0].props.margins = Some([0.0, 5.4, 0.0, 15.0]);
+            }
+            table_rect(&lay(&word_page(mode, "After", t)), 0, 0).unwrap().x
+        };
+        let (partial, full) = (placed(true), placed(false));
+        assert!(
+            (partial - want).abs() < 0.05 && (full - want).abs() < 0.05,
+            "mode {mode}, {align:?}: {partial} (some sides), {full} (all), not {want}"
+        );
+    }
+}
+
+#[test]
+fn text_beside_a_floating_table_keeps_clear_of_its_border_or_a_little_past_its_cells() {
+    // Word: text right of a 150 pt table at 70.9 pt across the page, 7.1 pt from text, starts
+    // (on a quarter-point grid) at the outer edge of the border plus 7.1, or with no border
+    // about 0.75 pt further than the cell edge plus 7.1.
+    let left = |mode: u32, margins: (f32, f32), border: f32| {
+        let float = TableFloat { h_rel: Anchor::Page, x: 70.9, dist: [7.1, 0.0, 7.1, 0.0], ..on_page(28.35) };
+        let l = lay(&word_page(mode, "Beside", plain_table(margins, border, float)));
+        (table_rect(&l, 0, 0).unwrap(), lines(&l, 0, 1).unwrap())
+    };
+    for (mode, margins, border, word) in [
+        (12, (0.5, 0.5), 0.0, 228.25),
+        (12, (5.4, 5.4), 0.0, 223.25),
+        (15, (0.5, 0.5), 0.0, 228.75),
+        (12, (0.5, 0.5), 0.5, 227.75),
+        (15, (0.5, 0.5), 0.5, 228.5),
+        (15, (0.5, 0.5), 3.0, 231.0),
+    ] {
+        let (table, (top, _, x)) = left(mode, margins, border);
+        assert!((top - 28.35).abs() < 0.01, "mode {mode}, margins {margins:?}, border {border}: beside the table at {top}, {table:?}");
+        assert!((x - word).abs() < 0.3, "mode {mode}, margins {margins:?}, border {border}: text from {x}, Word {word}, {table:?}");
+    }
+}
+
 fn multiple(text: &str, m: f32) -> Paragraph {
     use wordcraft_doc::props::LineSpacing;
     let mut p = spaced(text, 0.0);

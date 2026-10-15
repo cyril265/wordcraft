@@ -1379,9 +1379,9 @@ fn layout_box(
                     // A floating table stands at its own position and takes no room; the text
                     // after it wraps around it.
                     Some(f) => {
-                        let legacy = if ctx.doc.settings.compat_mode < 15 { table::first_cell_left_margin(ctx, t) } else { 0.0 };
-                        let (r, area) = box_float_table_rect(frame, width, y, &tl, &f, legacy, &float_tables);
-                        excl.push((area, false, None, WrapText::BothSides));
+                        let edges = table::float_edges(ctx, t);
+                        let (r, area) = box_float_table_rect(frame, width, y, &tl, &f, edges, &float_tables);
+                        excl.push((float_table_wrap(area, edges), false, None, WrapText::BothSides));
                         float_tables.push(area);
                         table_areas.push(area);
                         if f.v_rel == Anchor::Page {
@@ -1482,7 +1482,7 @@ fn box_float_table_rect(
     y: f32,
     tl: &table::TableLayout,
     f: &TableFloat,
-    legacy: f32,
+    edges: table::FloatEdges,
     float_tables: &[Rect],
 ) -> (Rect, Rect) {
     let h = tl.rows.iter().map(|r| r.height).sum::<f32>().clamp(0.0, 100_000.0);
@@ -1511,24 +1511,24 @@ fn box_float_table_rect(
     };
     // Nor is there an area to align in: the table starts where the text is.
     let v_align = if frame.is_none() && matches!(f.v_rel, Anchor::Page | Anchor::Margin) { None } else { f.v_align };
-    let x = align_in(h_area, f.x, w, PageFrame::h_align(frame.as_ref(), f.h_align)) - if f.h_align.is_none() { legacy } else { 0.0 };
-    let r = clear_of_float_tables(Rect::new(x, align_in(v_area, y_off, h, v_align), w, h), f, legacy, h_area.0, float_tables);
+    let x = float_x(h_area, f.x, w, PageFrame::h_align(frame.as_ref(), f.h_align), edges);
+    let r = clear_of_float_tables(Rect::new(x, align_in(v_area, y_off, h, v_align), w, h), f, edges, h_area.0, float_tables);
     let [dl, dt, dr, db] = f.dist_from_text();
     (r, r.inset(-dl, -dt, -dr, -db))
 }
 
 /// Floating table `f` at `r`, moved below the floating tables in its way when it may not
-/// overlap them. In Word 2013+ layout one placed by an offset keeps its distance from the text's
-/// left edge (`text_left`).
-fn clear_of_float_tables(mut r: Rect, f: &TableFloat, legacy: f32, text_left: f32, others: &[Rect]) -> Rect {
+/// overlap them. In Word 2013+ layout one placed by an offset keeps the distance of its placed
+/// edge (see [`float_x`]) from the text's left edge (`text_left`).
+fn clear_of_float_tables(mut r: Rect, f: &TableFloat, edges: table::FloatEdges, text_left: f32, others: &[Rect]) -> Rect {
     let [dl, dt, dr, db] = f.dist_from_text();
-    let keeps_text_distance = legacy == 0.0 && f.h_align.is_none() && f.x >= 0.0 && matches!(f.h_rel, Anchor::Margin | Anchor::Column);
+    let keeps_text_distance = edges.out.0 <= 0.0 && f.h_align.is_none() && f.x >= 0.0 && matches!(f.h_rel, Anchor::Margin | Anchor::Column);
     for _ in 0..64 {
         let area = r.inset(-dl, -dt, -dr, -db);
         let Some(below) = others.iter().filter(|o| !f.overlap && o.intersects(&area)).map(|o| o.bottom()).reduce(f32::max) else { break };
         r.y = below + dt;
         if keeps_text_distance {
-            r.x = r.x.max(text_left + dl);
+            r.x = r.x.max(text_left + dl - edges.out.0);
         }
     }
     r
@@ -4478,16 +4478,15 @@ fn place_table(
     let width = pb.col_w();
     let mut tl = table::layout_table(ctx, StoryRef::Body, t, &[block as u32], width, 1);
     if let Some(f) = t.props.float.filter(|_| !pb.web) {
-        // Before Word 2013 layout (compatibility mode 15) an offset places the first cell's text,
-        // so the edge sits a cell margin further out.
-        let legacy = if ctx.doc.settings.compat_mode < 15 { table::first_cell_left_margin(ctx, t) } else { 0.0 };
+        // Where its offset or alignment puts its cell edges, and how far text keeps from them.
+        let edges = table::float_edges(ctx, t);
         let h: f32 = tl.rows.iter().map(|r| r.height).sum();
         if h <= pb.uncapped_bottom() - pb.top + 0.01 {
-            return place_floating_table(ctx, pb, &tl, &f, legacy, block, body_top, at);
+            return place_floating_table(ctx, pb, &tl, &f, edges, block, body_top, at);
         }
         // Too tall for a page: Word lets it run across pages like a table in the text, from its
         // own left edge.
-        tl.x = float_table_x(pb, tl.width, &f, legacy, ctx.mirror) - pb.col_x();
+        tl.x = float_table_x(pb, tl.width, &f, edges, ctx.mirror) - pb.col_x();
     }
     // A table in the text flow starts below the floating objects in its way.
     below_floats(ctx, pb, pb.col_x() + tl.x, pb.col_x() + tl.x + tl.width);
@@ -4710,7 +4709,7 @@ fn place_floating_table(
     pb: &mut PageBuilder,
     tl: &table::TableLayout,
     f: &TableFloat,
-    legacy: f32,
+    edges: table::FloatEdges,
     block: usize,
     body_top: f32,
     at: Option<Rect>,
@@ -4730,13 +4729,13 @@ fn place_floating_table(
             Anchor::Margin => (s.margin_top, s.text_height()),
             _ => (pb.y, 0.0),
         };
-        let x = float_table_x(pb, w, f, legacy, ctx.mirror);
+        let x = float_table_x(pb, w, f, edges, ctx.mirror);
         let r = match at {
             Some(r) => r,
             None => {
                 let mut obstacles = if f.overlap { Vec::new() } else { header_table_areas(ctx, pb) };
                 obstacles.extend_from_slice(&pb.float_tables);
-                clear_of_float_tables(Rect::new(x, align_in(v_area, f.y, h, f.v_align), w, h), f, legacy, h_area.0, &obstacles)
+                clear_of_float_tables(Rect::new(x, align_in(v_area, f.y, h, f.v_align), w, h), f, edges, h_area.0, &obstacles)
             }
         };
         // Like Word, a table that doesn't fit below the text before it moves to the next page with
@@ -4767,7 +4766,7 @@ fn place_floating_table(
             pg.float_tables.push(Path::top(block));
         }
         let area = r.inset(-dl, -dt, -dr, -db);
-        let wrap: WrapArea = (area, false, None, WrapText::BothSides);
+        let wrap: WrapArea = (float_table_wrap(area, edges), false, None, WrapText::BothSides);
         if at.is_none() {
             pb.excl.push(wrap.clone());
         }
@@ -4828,12 +4827,25 @@ fn float_table_h_area(pb: &PageBuilder, f: &TableFloat, mirror: bool) -> (f32, f
     }
 }
 
-/// A floating table's left edge on the page (`legacy`: the first cell's left margin before Word
-/// 2013 layout, when an offset places the cell's text).
-fn float_table_x(pb: &PageBuilder, w: f32, f: &TableFloat, legacy: f32, mirror: bool) -> f32 {
+/// A floating table's left edge on the page (see [`float_x`]).
+fn float_table_x(pb: &PageBuilder, w: f32, f: &TableFloat, edges: table::FloatEdges, mirror: bool) -> f32 {
     let align = PageFrame::h_align(Some(&page_frame(pb, mirror)), f.h_align);
-    let x = align_in(float_table_h_area(pb, f, mirror), f.x, w, align);
-    if f.h_align.is_none() { x - legacy } else { x }
+    float_x(float_table_h_area(pb, f, mirror), f.x, w, align, edges)
+}
+
+/// The left cell edge of a floating table `w` wide placed at `offset` in `area` or aligned in
+/// it: the offset or alignment places the edges that stand [`table::FloatEdges::out`] inside
+/// the cell edges.
+fn float_x(area: (f32, f32), offset: f32, w: f32, align: Option<FloatAlign>, edges: table::FloatEdges) -> f32 {
+    let (l, r) = (edges.out.0.clamp(-1584.0, 1584.0), edges.out.1.clamp(-1584.0, 1584.0));
+    align_in(area, offset, (w - l - r).max(0.0), align) - l
+}
+
+/// The area text keeps clear of around a floating table whose cells and distances from text
+/// take `area`: wider by [`table::FloatEdges::wrap`] on each side.
+fn float_table_wrap(area: Rect, edges: table::FloatEdges) -> Rect {
+    let (l, r) = (edges.wrap.0.clamp(0.0, 12.0), edges.wrap.1.clamp(0.0, 12.0));
+    Rect::new(area.x - l, area.y, area.w + l + r, area.h)
 }
 
 /// Move `pb.y` below the floating objects in the way of something spanning `x0..x1` that
