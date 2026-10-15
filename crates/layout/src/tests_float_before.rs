@@ -1,0 +1,618 @@
+//! Text before a floating table or object on its page wraps around it like the text after it
+//! (see `float_before`): it moves below one placed over it, beside a narrow one, and stays above
+//! one lower down. The cases are those measured in Word (`docs/layout-parity.md`).
+//!
+//! Paragraphs have exact 17 pt lines and no space before or after (`exact_text`), and none of the
+//! tests depend on where a line breaks, so the results don't depend on the installed fonts.
+use super::tests::{rect_shape, shapes};
+use super::*;
+use wordcraft_doc::para::InlineObject;
+use wordcraft_doc::para::{Anchor, Float, FloatAlign, Wrap};
+use wordcraft_doc::props::{HeightRule, TableFloat};
+use wordcraft_doc::{PartKind, Pos, Table};
+
+fn lay(doc: &Document) -> DocLayout {
+    let mut c = LayoutCache::new();
+    layout(doc, &mut c, &LayoutOptions::default())
+}
+
+/// The lines of top-level body block `block` on page `page`: top and bottom of its lines and the
+/// left edge of its first line's room.
+fn lines(l: &DocLayout, page: usize, block: u32) -> Option<(f32, f32, f32)> {
+    let mut found: Option<(f32, f32, f32)> = None;
+    for it in &l.pages.get(page)?.items {
+        let Placed::Lines { story: StoryRef::Body, path, para, l0, l1, x, y, .. } = it else { continue };
+        if path.0 != [block] {
+            continue;
+        }
+        let shown = para.lines.get(*l0..*l1).unwrap_or(&[]);
+        let first = shown.first().map_or(0.0, |l| l.top);
+        for line in shown {
+            let (top, bottom) = (y + line.top - first, y + line.top - first + line.height);
+            found = Some(match found {
+                Some((t, b, left)) => (t.min(top), b.max(bottom), left),
+                None => (top, bottom, x + line.left),
+            });
+        }
+    }
+    found
+}
+
+fn top(l: &DocLayout, page: usize, block: u32) -> f32 {
+    lines(l, page, block).unwrap().0
+}
+
+/// The page block `block` starts on and its top there.
+fn page_top(l: &DocLayout, block: u32) -> (usize, f32) {
+    (0..l.pages.len()).find_map(|page| lines(l, page, block).map(|(t, ..)| (page, t))).unwrap()
+}
+
+/// Whether blocks `0..n` stand in order, each at least `line` below the one before on its page.
+fn in_order(l: &DocLayout, n: u32, line: f32) -> bool {
+    let at: Vec<(usize, f32)> = (0..n).map(|b| page_top(l, b)).collect();
+    at.windows(2).all(|w| w[1].0 > w[0].0 || (w[1].0 == w[0].0 && w[1].1 - w[0].1 >= line - 0.01))
+}
+
+/// Where table `block` stands on page `page` (its cells' union).
+fn table_rect(l: &DocLayout, page: usize, block: u32) -> Option<Rect> {
+    l.pages
+        .get(page)?
+        .items
+        .iter()
+        .filter_map(|it| if let Placed::Cell { rect, table, .. } = it { (table.0 == [block]).then_some(*rect) } else { None })
+        .reduce(|a, b| a.union(&b))
+}
+
+/// The paragraphs of `text` (one per line), each with exact 17 pt lines and no space before or
+/// after.
+fn exact_text(text: &str) -> Document {
+    use wordcraft_doc::props::LineSpacing;
+    let mut d = Document::from_text(text);
+    for b in &mut d.body {
+        if let Block::Para(p) = Arc::make_mut(b) {
+            p.props.line_spacing = Some(LineSpacing::Exactly(17.0));
+            p.props.space_before = Some(0.0);
+            p.props.space_after = Some(0.0);
+        }
+    }
+    d
+}
+
+/// How far an empty paragraph moves the next one down.
+fn empty_pitch() -> f32 {
+    let plain = lay(&exact_text("\nAfter"));
+    top(&plain, 0, 1) - top(&plain, 0, 0)
+}
+
+/// A one-cell floating table `w` wide with one row exactly `h` high, placed by `float`.
+fn float_table(w: f32, h: f32, float: TableFloat) -> Table {
+    let mut t = Table::new(1, 1, w);
+    t.rows[0].props.height = Some(h);
+    t.rows[0].props.height_rule = HeightRule::Exact;
+    t.props.float = Some(float);
+    t
+}
+
+/// Placed `y` from the top of the page, across the page.
+fn on_page(y: f32) -> TableFloat {
+    TableFloat { h_rel: Anchor::Page, v_rel: Anchor::Page, y, ..Default::default() }
+}
+
+/// The paragraphs of `text` with floating table `t` inserted before paragraph `at`.
+fn doc_with_table(text: &str, at: usize, t: Table) -> Document {
+    let mut d = exact_text(text);
+    d.insert_block(StoryRef::Body, &Path::top(at), Block::Table(t)).unwrap();
+    d
+}
+
+/// Every body line on page `page` clear of `r`.
+fn clear_of(l: &DocLayout, page: usize, r: &Rect) -> bool {
+    l.pages[page].items.iter().all(|it| match it {
+        Placed::Lines { story: StoryRef::Body, path, para, l0, l1, x, y, .. } if path.0.len() == 1 => {
+            let shown = para.lines.get(*l0..*l1).unwrap_or(&[]);
+            let first = shown.first().map_or(0.0, |l| l.top);
+            // (Rounding: a line ending a hair inside the table is clear of it.)
+            shown.iter().all(|line| !Rect::new(x + line.left, y + line.top - first + 0.01, line.right - line.left, line.height - 0.02).intersects(r))
+        }
+        _ => true,
+    })
+}
+
+#[test]
+fn a_paragraph_before_a_floating_table_over_it_moves_below_it() {
+    // Word: `ZZZ`, a full-width table placed on the page 23.3pt down over it, `AAA`: ZZZ goes
+    // below the table and AAA after it (both used to stay at the top margin, under the table).
+    for text in ["Before\nAfter", "\nAfter"] {
+        let l = lay(&doc_with_table(text, 1, float_table(612.0, 100.0, on_page(40.0))));
+        assert_eq!(l.pages.len(), 1);
+        let table = table_rect(&l, 0, 1).unwrap();
+        assert!((table.y - 40.0).abs() < 0.01, "{text:?}: the table stays put: {table:?}");
+        let (before, after) = (lines(&l, 0, 0).unwrap(), lines(&l, 0, 2).unwrap());
+        assert!(before.0 >= table.bottom() - 0.01, "{text:?}: the paragraph before at {before:?}, the table ends at {}", table.bottom());
+        assert!(after.0 >= before.1 - 0.01, "{text:?}: after at {after:?}, below the one before ({before:?})");
+    }
+    // The empty paragraph before the table takes its room below it: the text after starts that
+    // much lower than with no paragraph before the table.
+    let alone = lay(&doc_with_table("After", 0, float_table(612.0, 100.0, on_page(40.0))));
+    let l = lay(&doc_with_table("\nAfter", 1, float_table(612.0, 100.0, on_page(40.0))));
+    let after = top(&l, 0, 2);
+    assert!((after - top(&alone, 0, 1) - empty_pitch()).abs() < 0.5, "after at {after}, alone {}", top(&alone, 0, 1));
+}
+
+#[test]
+fn a_paragraph_before_a_floating_table_lower_down_stays_above_it() {
+    // Word: a table 150pt down leaves room above it for the paragraph before and the one after.
+    let l = lay(&doc_with_table("Before\nAfter", 1, float_table(612.0, 100.0, on_page(300.0))));
+    assert!((top(&l, 0, 0) - 72.0).abs() < 0.5, "{}", top(&l, 0, 0));
+    assert!(lines(&l, 0, 2).unwrap().1 <= 300.0, "{:?}", lines(&l, 0, 2));
+}
+
+#[test]
+fn of_the_paragraphs_before_a_floating_table_those_in_its_way_move_below_it() {
+    // Word: eight paragraphs, then a table 100pt down: the first stay above it, the rest go below
+    // it in order.
+    let text_8 = (1..=8).map(|i| format!("Paragraph {i}")).collect::<Vec<_>>().join("\n") + "\nAfter";
+    for y in [120.0, 160.0] {
+        let l = lay(&doc_with_table(&text_8, 8, float_table(612.0, 100.0, on_page(y))));
+        let table = table_rect(&l, 0, 8).unwrap();
+        let boxes: Vec<(f32, f32, f32)> = (0..8).chain(9..10).map(|b| lines(&l, 0, b).unwrap()).collect();
+        assert!((boxes[0].0 - 72.0).abs() < 0.5, "y {y}: the first paragraph stays at the top: {boxes:?}");
+        assert!(boxes.windows(2).all(|w| w[1].0 >= w[0].1 - 0.01), "y {y}: in order: {boxes:?}");
+        assert!(boxes.iter().all(|(t, b, _)| *b <= table.y + 0.01 || *t >= table.bottom() - 0.01), "y {y}: {boxes:?} around {table:?}");
+        assert!(boxes.iter().any(|(t, ..)| *t >= table.bottom() - 0.01), "y {y}: some below: {boxes:?}");
+    }
+}
+
+#[test]
+fn a_paragraph_before_a_narrow_floating_table_wraps_beside_it() {
+    // Word: a table half the text wide at the left margin; the paragraph before it runs beside it
+    // like the one after it. One at the right leaves it where it was.
+    let left = TableFloat { h_rel: Anchor::Margin, dist: [7.1, 0.0, 7.1, 0.0], ..on_page(40.0) };
+    let l = lay(&doc_with_table("Before\nAfter", 1, float_table(234.0, 100.0, left)));
+    let table = table_rect(&l, 0, 1).unwrap();
+    for block in [0, 2] {
+        let (t, _, x) = lines(&l, 0, block).unwrap();
+        assert!(x >= table.right() + 7.1 - 0.01 && t < table.bottom(), "block {block}: at ({x}, {t}), beside {table:?}");
+    }
+    let right = TableFloat { h_rel: Anchor::Margin, x: 300.0, ..left };
+    let l = lay(&doc_with_table("Before\nAfter", 1, float_table(168.0, 100.0, right)));
+    let (t, _, x) = lines(&l, 0, 0).unwrap();
+    assert!((t - 72.0).abs() < 0.5 && (x - 72.0).abs() < 0.01, "at ({x}, {t})");
+}
+
+#[test]
+fn margin_and_text_anchored_tables_move_the_paragraph_before_them_too() {
+    // Word: 15pt below the top margin, or 15pt above where the text after it starts: the
+    // paragraph before goes below the table, which stays where it was placed.
+    let margin = TableFloat { v_rel: Anchor::Margin, y: 10.0, ..on_page(0.0) };
+    let l = lay(&doc_with_table("Before\nAfter", 1, float_table(612.0, 100.0, margin)));
+    let table = table_rect(&l, 0, 1).unwrap();
+    assert!((table.y - 82.0).abs() < 0.01 && top(&l, 0, 0) >= table.bottom() - 0.01, "{table:?}, before at {}", top(&l, 0, 0));
+    // Where the table's text position is: below the paragraph before, as laid out first.
+    let plain = lay(&exact_text("Before\nAfter"));
+    let starts = top(&plain, 0, 1);
+    let text_anchored = TableFloat { v_rel: Anchor::Paragraph, y: -15.0, ..on_page(0.0) };
+    let l = lay(&doc_with_table("Before\nAfter", 1, float_table(612.0, 100.0, text_anchored)));
+    let table = table_rect(&l, 0, 1).unwrap();
+    assert!((table.y - (starts - 15.0)).abs() < 0.5, "{table:?}, the text after started at {starts}");
+    assert!(top(&l, 0, 0) >= table.bottom() - 0.01 && top(&l, 0, 2) > top(&l, 0, 0), "{} {}", top(&l, 0, 0), top(&l, 0, 2));
+}
+
+#[test]
+fn on_a_later_page_the_paragraph_before_moves_below_the_table_too() {
+    // Word: the same on page 2, after a page break before the paragraph (empty or not).
+    for text in ["First\nBefore\nAfter", "First\n\nAfter"] {
+        let mut d = doc_with_table(text, 2, float_table(612.0, 100.0, on_page(40.0)));
+        if let Some(Block::Para(p)) = d.body.get_mut(1).map(Arc::make_mut) {
+            p.props.page_break_before = Some(true);
+        }
+        let l = lay(&d);
+        assert_eq!(l.pages.len(), 2, "{text:?}");
+        let table = table_rect(&l, 1, 2).unwrap();
+        assert!(top(&l, 1, 1) >= table.bottom() - 0.01, "{text:?}: {} above the table's bottom {}", top(&l, 1, 1), table.bottom());
+        assert!(top(&l, 1, 3) >= lines(&l, 1, 1).unwrap().1 - 0.01, "{text:?}");
+    }
+}
+
+#[test]
+fn a_table_with_no_vertical_offset_stands_where_the_text_is() {
+    // Word: `w:tblpY` 0 (or none) from the page or margin, with no `w:tblpYSpec`, puts the table
+    // where the text is, below the paragraph before it; aligned at the top it goes to the top.
+    for v_rel in [Anchor::Page, Anchor::Margin] {
+        let l = lay(&doc_with_table("Before\nAfter", 1, float_table(612.0, 100.0, TableFloat { v_rel, ..on_page(0.0) })));
+        let table = table_rect(&l, 0, 1).unwrap();
+        let before = lines(&l, 0, 0).unwrap();
+        assert!((before.0 - 72.0).abs() < 0.5 && table.y >= before.1 - 0.01 && table.y < before.1 + 20.0, "{v_rel:?}: {before:?} {table:?}");
+        assert!(top(&l, 0, 2) >= table.bottom() - 0.01);
+    }
+    let top_aligned = TableFloat { v_align: Some(FloatAlign::Start), ..on_page(0.0) };
+    let l = lay(&doc_with_table("Before\nAfter", 1, float_table(612.0, 100.0, top_aligned)));
+    let table = table_rect(&l, 0, 1).unwrap();
+    assert!(table.y.abs() < 0.01 && top(&l, 0, 0) >= table.bottom() - 0.01, "{table:?} {}", top(&l, 0, 0));
+}
+
+/// Body paragraphs `texts`, with floating shape `w` × `h` (`float`) in paragraph `anchor`.
+fn doc_with_shape(texts: &str, anchor: usize, w: f32, h: f32, float: Float) -> Document {
+    let mut d = exact_text(texts);
+    d.insert_object(&Pos::body(anchor, 0), rect_shape(w, h, float), &Default::default()).unwrap();
+    d
+}
+
+#[test]
+fn a_paragraph_before_a_floating_shapes_anchor_wraps_around_the_shape() {
+    // Word: a shape placed on the page over the paragraph before its anchor moves that paragraph
+    // below it (wrapping top and bottom) or beside it (square wrap); one placed from its
+    // paragraph, above it and over the paragraph before (Word: 20 pt; here 10 pt, with 17 pt
+    // lines), stays there and the paragraph before goes below it.
+    let full = Float { wrap: Wrap::TopAndBottom, h_rel: Anchor::Page, v_rel: Anchor::Page, y: 40.0, ..Default::default() };
+    let l = lay(&doc_with_shape("Before\nAnchor\nAfter", 1, 612.0, 100.0, full.clone()));
+    let shape = shapes(&l.pages[0].items)[0];
+    assert!((shape.y - 40.0).abs() < 0.01, "{shape:?}");
+    assert!(top(&l, 0, 0) >= shape.bottom() - 0.01, "{} {shape:?}", top(&l, 0, 0));
+    assert!(top(&l, 0, 1) >= lines(&l, 0, 0).unwrap().1 - 0.01);
+
+    let square = Float { wrap: Wrap::Square, h_rel: Anchor::Margin, ..full.clone() };
+    let l = lay(&doc_with_shape("Before\nAnchor\nAfter", 1, 200.0, 100.0, square));
+    let shape = shapes(&l.pages[0].items)[0];
+    let (t, _, x) = lines(&l, 0, 0).unwrap();
+    assert!(x >= shape.right() - 0.01 && t < shape.bottom(), "beside: ({x}, {t}), {shape:?}");
+
+    let plain = lay(&exact_text("First\nBefore\nAnchor\nAfter"));
+    let anchor_top = top(&plain, 0, 2);
+    let from_para = Float { v_rel: Anchor::Paragraph, y: -10.0, ..full };
+    let l = lay(&doc_with_shape("First\nBefore\nAnchor\nAfter", 2, 612.0, 100.0, from_para));
+    let shape = shapes(&l.pages[0].items)[0];
+    assert!((top(&l, 0, 0) - 72.0).abs() < 0.5, "the first paragraph stays: {}", top(&l, 0, 0));
+    assert!((shape.y - (anchor_top - 10.0)).abs() < 0.01, "{shape:?}, its paragraph started at {anchor_top}");
+    assert!(top(&l, 0, 1) >= shape.bottom() - 0.01, "{} {shape:?}", top(&l, 0, 1));
+}
+
+#[test]
+fn text_laid_out_again_right_below_a_shape_is_not_under_it() {
+    // Swept over offsets and heights that aren't whole points (and lines of 16.4634 pt, the
+    // height of the line Word's documents without styles have here): the paragraph before goes
+    // below the shape, which stays where its paragraph placed it. Only text before the first
+    // block laid out again counts as under the shape: the line laid out again right below it
+    // (touching it, give or take rounding), or the first line where line breaking leaves it 0.1
+    // pt into the shape, would leave the shape to the layout passes of #2048 and move it down.
+    use wordcraft_doc::props::LineSpacing;
+    for k in 0..40 {
+        let (dy, h) = (-10.0 - 0.173 * k as f32, 100.0 + 0.311 * k as f32);
+        let mut d = exact_text("First\nBefore\nAnchor\nAfter");
+        for b in &mut d.body {
+            if let Block::Para(p) = Arc::make_mut(b) {
+                p.props.line_spacing = Some(LineSpacing::Exactly(16.4634));
+            }
+        }
+        let anchor_top = top(&lay(&d), 0, 2);
+        let from_para = Float { wrap: Wrap::TopAndBottom, h_rel: Anchor::Page, v_rel: Anchor::Paragraph, y: dy, ..Default::default() };
+        d.insert_object(&Pos::body(2, 0), rect_shape(612.0, h, from_para), &Default::default()).unwrap();
+        let l = lay(&d);
+        let shape = shapes(&l.pages[0].items)[0];
+        assert!((shape.y - (anchor_top + dy)).abs() < 0.01, "{dy}, {h}: {shape:?}, its paragraph started at {anchor_top}");
+        assert!(top(&l, 0, 1) >= shape.bottom() - 0.01 && in_order(&l, 4, 16.46), "{dy}, {h}: {} {shape:?}", top(&l, 0, 1));
+    }
+}
+
+#[test]
+fn an_empty_paragraph_before_a_letterhead_table_ends_up_below_the_address_block() {
+    // A letter: an empty paragraph, a full-width table at the top of the page, then a paragraph
+    // anchoring an address block placed on the page below the table. Word moves the empty
+    // paragraph below the table and then below the block, so the subject starts a line lower.
+    let block = Float { wrap: Wrap::TopAndBottom, h_rel: Anchor::Page, v_rel: Anchor::Page, y: 127.6, ..Default::default() };
+    let letter = |text: &str, at: usize| {
+        let mut d = doc_with_table(text, at, float_table(598.4, 99.25, on_page(23.3)));
+        d.insert_object(&Pos::body(at + 1, 0), rect_shape(468.0, 198.4, block.clone()), &Default::default()).unwrap();
+        d
+    };
+    let l = lay(&letter("\nSubject\nAfter", 1));
+    let shape = shapes(&l.pages[0].items)[0];
+    let empty = lines(&l, 0, 0).unwrap();
+    assert!(empty.0 >= shape.bottom() - 0.01, "{empty:?} {shape:?}");
+    let without = lay(&letter("Subject\nAfter", 0));
+    assert!((top(&l, 0, 2) - top(&without, 0, 1) - empty_pitch()).abs() < 0.5, "{} {}", top(&l, 0, 2), top(&without, 0, 1));
+}
+
+#[test]
+fn text_before_floating_tables_never_overlaps_them_nor_gets_lost() {
+    // Swept over where the table stands, how much text comes before it and how wide it is: every
+    // paragraph is placed once, and none of the text on the table's page overlaps it when it all
+    // still fits there.
+    for y in (0..=720).step_by(45) {
+        for n in [0usize, 1, 3, 12, 30, 45] {
+            for w in [612.0, 200.0] {
+                let mut text: Vec<String> =
+                    (0..n).map(|i| format!("Paragraph {i} before the table, long enough to run over a line or two when it is narrowed.")).collect();
+                text.push("After".into());
+                // (Automatic line spacing: a line is as tall as checked against the table.)
+                let mut d = Document::from_text(&text.join("\n"));
+                d.insert_block(
+                    StoryRef::Body,
+                    &Path::top(n),
+                    Block::Table(float_table(w, 100.0, TableFloat { h_rel: Anchor::Margin, ..on_page(y as f32) })),
+                )
+                .unwrap();
+                let l = lay(&d);
+                let firsts = l
+                    .pages
+                    .iter()
+                    .flat_map(|p| &p.items)
+                    .filter(|it| matches!(it, Placed::Lines { story: StoryRef::Body, path, l0: 0, .. } if path.0.len() == 1))
+                    .count();
+                assert_eq!(firsts, n + 1, "y {y}, {n} before, {w} wide");
+                let Some((page, table)) = (0..l.pages.len()).find_map(|p| table_rect(&l, p, n as u32).map(|r| (p, r))) else {
+                    panic!("y {y}, {n}: no table")
+                };
+                if l.pages.len() == 1 {
+                    assert!(clear_of(&l, page, &table), "y {y}, {n} before, {w} wide: text over {table:?}");
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn two_floating_tables_on_a_page_keep_the_text_before_both_clear() {
+    let text: Vec<String> = (0..12).map(|i| format!("Paragraph {i}")).collect();
+    let mut d = doc_with_table(&text.join("\n"), 6, float_table(612.0, 60.0, on_page(150.0)));
+    d.insert_block(StoryRef::Body, &Path::top(3), Block::Table(float_table(612.0, 60.0, on_page(60.0)))).unwrap();
+    let l = lay(&d);
+    let (first, second) = (table_rect(&l, 0, 3).unwrap(), table_rect(&l, 0, 7).unwrap());
+    assert!((first.y - 60.0).abs() < 0.01 && (second.y - 150.0).abs() < 0.01, "{first:?} {second:?}");
+    assert!(clear_of(&l, 0, &first) && clear_of(&l, 0, &second));
+    let tops: Vec<f32> = (0..14).filter(|b| ![3, 7].contains(b)).map(|b| top(&l, 0, b)).collect();
+    assert!(tops.windows(2).all(|w| w[1] > w[0]), "in order: {tops:?}");
+}
+
+#[test]
+fn hostile_floating_table_positions_lay_out() {
+    for y in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY, -1e30, 1e30, -50.0] {
+        let l = lay(&doc_with_table("Before\n\nAfter", 2, float_table(612.0, 100.0, on_page(y))));
+        let firsts = l
+            .pages
+            .iter()
+            .flat_map(|p| &p.items)
+            .filter(|it| matches!(it, Placed::Lines { story: StoryRef::Body, path, l0: 0, .. } if path.0.len() == 1))
+            .count();
+        assert_eq!(firsts, 3, "y {y}");
+    }
+}
+
+#[test]
+fn a_paragraph_whose_shape_would_push_the_text_before_it_or_itself_off_the_page_starts_the_next_page() {
+    // Word (A4, the same geometry 1.8 pt further down): paragraphs of 17 pt lines from 72, then
+    // one anchoring a shape across the page from 80 to 280. With 24 paragraphs before it they all
+    // go below the shape and the anchor paragraph ends at 705. With 25 the text before still fits
+    // below the shape (to 705) but the anchor paragraph doesn't (722); with 26 the text before
+    // doesn't fit either. Then the text before stays where it was and the anchor paragraph starts
+    // the next page with its shape, below it.
+    let full = Float { wrap: Wrap::TopAndBottom, h_rel: Anchor::Page, v_rel: Anchor::Page, y: 80.0, ..Default::default() };
+    for n in [24usize, 25, 26] {
+        let mut text: Vec<String> = (0..n).map(|i| format!("P{i}")).collect();
+        text.extend(["Anchor".to_string(), "After".to_string()]);
+        let l = lay(&doc_with_shape(&text.join("\n"), n, 612.0, 200.0, full.clone()));
+        let anchor = n as u32;
+        if n == 24 {
+            let shape = shapes(&l.pages[0].items)[0];
+            assert!((top(&l, 0, 0) - 280.0).abs() < 0.01 && (top(&l, 0, anchor) - 688.0).abs() < 0.01, "{n}: {shape:?}");
+            continue;
+        }
+        for b in 0..anchor {
+            let want = 72.0 + 17.0 * b as f32;
+            assert!((top(&l, 0, b) - want).abs() < 0.01, "{n}: paragraph {b} at {}, not {want}", top(&l, 0, b));
+        }
+        assert!(shapes(&l.pages[0].items).is_empty(), "{n}: no shape left on page 1");
+        let shape = shapes(&l.pages[1].items)[0];
+        assert!((shape.y - 80.0).abs() < 0.01, "{n}: {shape:?}");
+        assert!(lines(&l, 0, anchor).is_none(), "{n}: the anchor paragraph left page 1");
+        assert!((top(&l, 1, anchor) - 280.0).abs() < 0.01, "{n}: anchor at {} on page 2, below its shape", top(&l, 1, anchor));
+    }
+}
+
+#[test]
+fn pages_aligned_in_the_middle_keep_their_text_in_order_around_a_float() {
+    // Vertical alignment moves a page's text when the page is left; laying text out again could
+    // not move it back, so such pages are not laid out again block by block: the text stays in
+    // order, at least 17 pt apart.
+    for valign in [wordcraft_doc::section::PageVAlign::Center, wordcraft_doc::section::PageVAlign::Bottom] {
+        let mut text: Vec<String> = (0..26).map(|i| format!("P{i}")).collect();
+        text.push("Anchor".to_string());
+        let full = Float { wrap: Wrap::TopAndBottom, h_rel: Anchor::Page, v_rel: Anchor::Page, y: 100.0, ..Default::default() };
+        let mut d = doc_with_shape(&text.join("\n"), 26, 612.0, 300.0, full);
+        d.last_section.valign = valign;
+        let l = lay(&d);
+        let at: Vec<(usize, f32)> = (0..26).map(|b| page_top(&l, b)).collect();
+        assert!(in_order(&l, 26, 17.0), "{valign:?}: {at:?}");
+    }
+}
+
+#[test]
+fn text_laid_out_again_keeps_its_footnote_once_and_its_paragraphs_kept_together() {
+    // A paragraph with a footnote and a heading kept with the next paragraph, both under a table
+    // placed on the page later: laid out again below the table, the footnote is on the page once,
+    // and the heading still starts right above its paragraph.
+    let mut d = exact_text("Noted\nHeading\nBody\nAfter");
+    let id = {
+        let id = d.add_part(PartKind::Footnote, vec![wordcraft_doc::para_block(Paragraph::with_text("The note.", Default::default()))]);
+        d.insert_object(
+            &Pos::body(0, 5),
+            InlineObject::NoteRef { kind: wordcraft_doc::para::NoteKind::Footnote, id, custom: String::new() },
+            &Default::default(),
+        )
+        .unwrap();
+        id
+    };
+    if let Some(Block::Para(p)) = d.body.get_mut(1).map(Arc::make_mut) {
+        p.props.keep_next = Some(true);
+    }
+    d.insert_block(StoryRef::Body, &Path::top(3), Block::Table(float_table(612.0, 100.0, on_page(40.0)))).unwrap();
+    let l = lay(&d);
+    let table = table_rect(&l, 0, 3).unwrap();
+    assert!(clear_of(&l, 0, &table));
+    assert!((top(&l, 0, 0) - table.bottom()).abs() < 0.01, "{}", top(&l, 0, 0));
+    assert!((top(&l, 0, 2) - lines(&l, 0, 1).unwrap().1).abs() < 0.01, "heading and body apart");
+    let notes = l.pages.iter().flat_map(|p| &p.items).filter(|it| matches!(it, Placed::Lines { story: StoryRef::Part(n), .. } if *n == id)).count();
+    assert_eq!(notes, 1, "the footnote is placed once");
+}
+
+#[test]
+fn text_of_an_earlier_section_on_the_page_goes_below_a_later_shape_too() {
+    // Word (A4, top margin 28.35 pt): `ZZZ`, a continuous section break, `YYY`, then a paragraph
+    // anchoring a shape across the page at 20–120 pt: ZZZ goes below the shape (122.7) and YYY
+    // after it (147.7), as without the section break. With `XXX` before ZZZ in the first section
+    // and the shape at 45–145 pt, ZZZ goes below the shape too. The walk restarts at a section
+    // break, so the earlier section's text is left to the pass that lays the page out again with
+    // the shape known from its start (#2048): here the shape at 80–180 pt is over the earlier
+    // section's first line (72–89) or second (89–106).
+    for (first, y) in [(None, 80.0), (Some("First"), 95.0)] {
+        let text = first.map_or(String::new(), |f| format!("{f}\n")) + "Earlier section\nBefore\nAnchor\nAfter";
+        let mut d = exact_text(&text);
+        let earlier = u32::from(first.is_some());
+        if let Some(Block::Para(p)) = d.body.get_mut(earlier as usize).map(Arc::make_mut) {
+            p.section = Some(Box::default());
+        }
+        d.last_section.start = wordcraft_doc::section::SectionStart::Continuous;
+        let full = Float { wrap: Wrap::TopAndBottom, h_rel: Anchor::Page, v_rel: Anchor::Page, y, ..Default::default() };
+        d.insert_object(&Pos::body(earlier as usize + 2, 0), rect_shape(612.0, 100.0, full), &Default::default()).unwrap();
+        let l = lay(&d);
+        let shape = shapes(&l.pages[0].items)[0];
+        assert!((shape.y - y).abs() < 0.01, "{first:?}: {shape:?}");
+        assert!(clear_of(&l, 0, &shape), "{first:?}: text under the shape {shape:?}");
+        if first.is_some() {
+            assert!((top(&l, 0, 0) - 72.0).abs() < 0.01, "the first line stays above the shape: {}", top(&l, 0, 0));
+        }
+        assert!((top(&l, 0, earlier) - shape.bottom()).abs() < 0.01, "{first:?}: earlier section at {}, {shape:?}", top(&l, 0, earlier));
+        assert!(in_order(&l, earlier + 4, 17.0), "{first:?}");
+    }
+}
+
+#[test]
+fn an_anchor_paragraph_that_runs_over_the_page_keeps_its_shape_and_first_lines_there() {
+    // Word (A4, the same geometry 1.8 pt further down): a four-line anchor paragraph (line breaks)
+    // after 23 paragraphs of 17 pt lines, its shape across the page from 80 to 280: the text
+    // before goes below the shape, the anchor's first two lines end page 1 (671, 688) and the
+    // other two start page 2, the shape staying on page 1. After 24 paragraphs one line stays
+    // on page 1; with widow control that line can't stay alone, so the text before stays where
+    // it was and the anchor paragraph starts page 2 with its shape (Word: its first three lines
+    // above the shape there, which starts 80 pt down; here no line fits above it).
+    let full = Float { wrap: Wrap::TopAndBottom, h_rel: Anchor::Page, v_rel: Anchor::Page, y: 80.0, ..Default::default() };
+    for (n, widow, on_first) in [(23usize, false, 2usize), (24, false, 1), (24, true, 0)] {
+        let mut text: Vec<String> = (0..n).map(|i| format!("P{i}")).collect();
+        text.extend(["Anchor".to_string(), "After".to_string()]);
+        let mut d = exact_text(&text.join("\n"));
+        if let Some(Block::Para(p)) = d.body.get_mut(n).map(Arc::make_mut) {
+            let q = Paragraph::with_text("A1\nA2\nA3\nA4", Default::default());
+            (p.text, p.runs) = (q.text, q.runs);
+        }
+        d.insert_object(&Pos::body(n, 0), rect_shape(612.0, 200.0, full.clone()), &Default::default()).unwrap();
+        for b in &mut d.body {
+            if let Block::Para(p) = Arc::make_mut(b) {
+                p.props.widow_control = Some(widow);
+            }
+        }
+        let l = lay(&d);
+        let anchor = n as u32;
+        let tops = |page: usize| -> Vec<f32> {
+            l.pages[page]
+                .items
+                .iter()
+                .filter_map(|it| match it {
+                    Placed::Lines { story: StoryRef::Body, path, para, l0, l1, y, .. } if path.0 == [anchor] => {
+                        Some(para.lines.get(*l0..*l1).unwrap_or(&[]).iter().map(|ln| y + ln.top - para.lines[*l0].top).collect::<Vec<_>>())
+                    }
+                    _ => None,
+                })
+                .flatten()
+                .collect()
+        };
+        let (first, second) = (tops(0), tops(1));
+        assert_eq!((first.len(), second.len()), (on_first, 4 - on_first), "{n} {widow}: {first:?} {second:?}");
+        if on_first > 0 {
+            let want: Vec<f32> = (0..on_first).map(|k| 280.0 + 17.0 * (n + k) as f32).collect();
+            assert!(first.iter().zip(&want).all(|(a, b)| (a - b).abs() < 0.01), "{n} {widow}: {first:?}, not {want:?}");
+            assert!((second[0] - 72.0).abs() < 0.01 && (top(&l, 0, 0) - 280.0).abs() < 0.01, "{n} {widow}: {second:?}");
+            assert_eq!((shapes(&l.pages[0].items).len(), shapes(&l.pages[1].items).len()), (1, 0), "{n} {widow}: the shape stays on page 1");
+        } else {
+            assert!((0..anchor).all(|b| (top(&l, 0, b) - (72.0 + 17.0 * b as f32)).abs() < 0.01), "{n} {widow}: the text before stays");
+            assert_eq!((shapes(&l.pages[0].items).len(), shapes(&l.pages[1].items).len()), (0, 1), "{n} {widow}: the shape goes with it");
+            assert!((second[0] - 280.0).abs() < 0.01, "{n} {widow}: below its shape: {second:?}");
+        }
+    }
+}
+
+#[test]
+fn a_page_whose_first_section_is_centred_keeps_the_text_before_a_float_in_order() {
+    // A centred section and a continuous top-aligned one on the same page: the page is aligned
+    // as its first section says when it is left, so the second section's text before a float
+    // is not laid out again there block by block either (in order, at least 17 pt apart).
+    let mut text: Vec<String> = vec!["Centred".to_string()];
+    text.extend((0..26).map(|i| format!("P{i}")));
+    text.push("Anchor".to_string());
+    let full = Float { wrap: Wrap::TopAndBottom, h_rel: Anchor::Page, v_rel: Anchor::Page, y: 100.0, ..Default::default() };
+    let mut d = doc_with_shape(&text.join("\n"), 27, 612.0, 300.0, full);
+    if let Some(Block::Para(p)) = d.body.get_mut(0).map(Arc::make_mut) {
+        p.section = Some(Box::new(wordcraft_doc::section::SectionProps { valign: wordcraft_doc::section::PageVAlign::Center, ..Default::default() }));
+    }
+    d.last_section.start = wordcraft_doc::section::SectionStart::Continuous;
+    let l = lay(&d);
+    let at: Vec<(usize, f32)> = (0..27).map(|b| page_top(&l, b)).collect();
+    assert!(in_order(&l, 27, 17.0), "{at:?}");
+}
+
+#[test]
+fn text_before_a_float_is_laid_out_again_only_up_to_512_blocks() {
+    // 600 paragraphs of exact 1 pt lines, the last anchoring a shape across the page at 80–100:
+    // laying out again from the first paragraph under the shape would take 592 blocks, past the
+    // bound, so it is not done (the text still goes below the shape, by a layout pass started
+    // again with the shape known from the page's start, #2048); with 400 paragraphs it is.
+    use wordcraft_doc::props::LineSpacing;
+    let full = Float { wrap: Wrap::TopAndBottom, h_rel: Anchor::Page, v_rel: Anchor::Page, y: 80.0, ..Default::default() };
+    for (n, replayed) in [(400usize, 392usize), (600, 0)] {
+        let text = vec![""; n].join("\n");
+        let mut d = doc_with_shape(&format!("{text}\nAnchor"), n, 612.0, 20.0, full.clone());
+        for b in &mut d.body {
+            if let Block::Para(p) = Arc::make_mut(b) {
+                p.props.line_spacing = Some(LineSpacing::Exactly(1.0));
+            }
+        }
+        crate::float_before::MOST.with(|c| c.set((0, 0)));
+        let l = lay(&d);
+        assert_eq!(crate::float_before::MOST.with(|c| c.get().1), replayed, "{n}: blocks laid out again before the shape");
+        assert_eq!(l.pages.len(), 1, "{n}");
+        let t = top(&l, 0, 8);
+        assert!(t >= 100.0 - 0.01, "{n}: paragraph 8 at {t}");
+    }
+}
+
+#[test]
+fn text_before_floats_is_laid_out_again_for_at_most_16_floats_on_a_page_across_sections() {
+    // 17 continuous sections on one page, each a paragraph and one anchoring a shape placed from
+    // it over the paragraph before: the budget of 16 is the page's, not each section's, so the
+    // text before the first 16 shapes is laid out again below them, the 17th's is not (it goes
+    // below it by a layout pass started again with the shape known from the page's start, #2048).
+    use wordcraft_doc::section::{SectionProps, SectionStart};
+    let text: Vec<String> = (0..17).flat_map(|k| [format!("B{k}"), format!("A{k}")]).collect();
+    let mut d = exact_text(&text.join("\n"));
+    let over = Float { wrap: Wrap::TopAndBottom, h_rel: Anchor::Page, v_rel: Anchor::Paragraph, y: -17.0, ..Default::default() };
+    for k in 0..17usize {
+        let anchor = 2 * k + 1;
+        d.insert_object(&Pos::body(anchor, 0), rect_shape(612.0, 2.0, over.clone()), &Default::default()).unwrap();
+        if k < 16
+            && let Some(Block::Para(p)) = d.body.get_mut(anchor).map(Arc::make_mut)
+        {
+            p.section = Some(Box::new(SectionProps { start: SectionStart::Continuous, ..Default::default() }));
+        }
+    }
+    d.last_section.start = SectionStart::Continuous;
+    crate::float_before::MOST.with(|c| c.set((0, 0)));
+    let l = lay(&d);
+    assert_eq!(crate::float_before::MOST.with(|c| c.get().0), 16, "floats the text before was laid out again for");
+    assert_eq!(l.pages.len(), 1);
+    let mut shapes = shapes(&l.pages[0].items);
+    shapes.sort_by(|a, b| a.y.total_cmp(&b.y));
+    assert_eq!(shapes.len(), 17);
+    for (k, shape) in shapes.iter().enumerate() {
+        let before = top(&l, 0, 2 * k as u32);
+        assert!(before >= shape.bottom() - 0.01, "section {k}: paragraph before at {before}, shape {shape:?}");
+    }
+}
