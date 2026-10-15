@@ -3942,11 +3942,12 @@ fn square_wrap_flows_text_on_both_sides() {
     assert!(para.lines.iter().all(|ln| !ln.beside && ink_end(para, ln) <= (r2.x - x).max(ln.right) + 0.01));
 }
 
-/// #1376: a word too long for the strip beside a square-wrapped object moves on whole (to the
-/// row's next strip, or the next row) instead of being split across the strip; words that fit
-/// still use it, and a word wider than the whole line still breaks where it is.
+/// #1376: in a row split by a square-wrapped object (text on both sides), a word too long for a
+/// strip moves on whole (to the row's next strip, or the next row) instead of being split across
+/// it, however long it is; words that fit still use it. A strip that is the row's only span takes
+/// the word split across it, as a line with no object does (Word for Mac).
 #[test]
-fn a_word_too_wide_for_the_strip_beside_a_float_moves_on_whole() {
+fn a_word_too_wide_for_a_strip_beside_a_float_moves_on_whole_only_in_a_split_row() {
     use wordcraft_doc::para::{Anchor, Float, ShapeKind, Wrap};
     // A `w` x 150pt square at `x` in the 468pt column, leaving a 32pt strip on its right. Each
     // line: (top, left, beside the object's far side, ends inside a word, where its text ends).
@@ -3980,13 +3981,14 @@ fn a_word_too_wide_for_the_strip_beside_a_float_moves_on_whole() {
     assert!(right.iter().all(|l| !l.3 && l.4 <= 468.01), "{right:?}");
     let short = lines("It is so, as it is to be, if we go on. ", 468.0 - 150.0 - 32.0, 150.0);
     assert!(short.iter().any(|l| l.2) && short.iter().all(|l| !l.3), "{short:?}");
-    // The strip is the row's only span: long words go below the object.
+    // The strip is the row's only span: Word splits a word too wide for it across the strip.
     let only = lines(long, 0.0, 468.0 - 32.0);
-    assert!(only.iter().all(|l| !l.3 && (l.0 >= 150.0 - 0.01 || l.1 >= 468.0 - 32.0 - 0.01)), "{only:?}");
-    assert!(only.iter().any(|l| l.0 >= 150.0 - 0.01 && l.1 < 1.0), "{only:?}");
-    // A word wider than the whole line breaks where it is, beside the object.
+    let beside: Vec<_> = only.iter().filter(|l| l.0 < 150.0 - 0.01).collect();
+    assert!(beside.iter().all(|l| l.1 >= 468.0 - 32.0 - 0.01 && l.4 <= 468.01) && beside.iter().any(|l| l.3), "{only:?}");
+    // In a split row even a word wider than the whole line moves on, row by row below the
+    // object, and breaks there (Word).
     let huge = lines(&format!("{} ", "x".repeat(120)), 468.0 - 150.0 - 32.0, 150.0);
-    assert!(huge[0].0 < 1.0 && huge.iter().any(|l| l.3), "{huge:?}");
+    assert!(huge[0].0 >= 150.0 - 0.01 && huge.iter().any(|l| l.3), "{huge:?}");
     // The strip left of the object: a skipped strip leaves the row's other span its first line.
     let left = lines(long, 32.0, 150.0);
     assert!(left.iter().all(|l| !l.3) && left.iter().any(|l| l.0 < 150.0 && l.1 >= 182.0 - 0.01 && !l.2), "{left:?}");

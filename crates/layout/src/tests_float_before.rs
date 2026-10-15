@@ -2,8 +2,9 @@
 //! (see `float_before`): it moves below one placed over it, beside a narrow one, and stays above
 //! one lower down. The cases are those measured in Word (`docs/layout-parity.md`).
 //!
-//! Paragraphs have exact 17 pt lines and no space before or after (`exact_text`), and none of the
-//! tests depend on where a line breaks, so the results don't depend on the installed fonts.
+//! Paragraphs have exact 17 pt lines and no space before or after (`exact_text`), and the tests
+//! don't depend on where a line breaks, or (words split beside a float) only on widths that hold
+//! in any font (`sized`), so the results don't depend on the installed fonts.
 use super::tests::{rect_shape, shapes};
 use super::*;
 use wordcraft_doc::para::InlineObject;
@@ -1167,6 +1168,241 @@ fn text_beside_a_floating_table_keeps_clear_of_its_border_or_a_little_past_its_c
         assert!((top - 28.35).abs() < 0.01, "mode {mode}, margins {margins:?}, border {border}: beside the table at {top}, {table:?}");
         assert!((x - word).abs() < 0.3, "mode {mode}, margins {margins:?}, border {border}: text from {x}, Word {word}, {table:?}");
     }
+}
+
+/// The lines of top-level body block `block` on page 0: top, left edge of the room, right edge
+/// of the ink, and whether the line ends inside a word.
+fn word_lines(l: &DocLayout, block: u32) -> Vec<(f32, f32, f32, bool)> {
+    let mut out = Vec::new();
+    for it in &l.pages[0].items {
+        let Placed::Lines { story: StoryRef::Body, path, para, l0, l1, x, y, .. } = it else { continue };
+        if path.0 != [block] {
+            continue;
+        }
+        let first = para.lines.get(*l0).map_or(0.0, |ln| ln.top);
+        for ln in para.lines.get(*l0..*l1).unwrap_or(&[]) {
+            let ink = (ln.c0..ln.c1)
+                .filter_map(|k| {
+                    let c = para.clusters.get(k)?;
+                    (c.kind != para::ClKind::Space).then_some(ln.xs.get(k - ln.c0)? + c.adv)
+                })
+                .fold(ln.left, f32::max);
+            let split = ln.end == para::LineEnd::Wrap && ln.c1 > ln.c0 && !para.clusters[ln.c1 - 1].break_after;
+            out.push((y + ln.top - first, x + ln.left, x + ink, split));
+        }
+    }
+    out
+}
+
+/// A paragraph of `text` in 16 pt with exact 17 pt lines, `before` before and nothing after.
+/// Twelve 16 pt W are wider than 60 pt and narrower than 200 pt in any font, sixty wider than
+/// the 468 pt text.
+fn sized(text: &str, before: f32) -> Paragraph {
+    let mut p = Paragraph::with_text(text, CharProps { size: Some(16.0), ..Default::default() });
+    p.props = spaced("", 0.0).props;
+    p.props.space_before = Some(before);
+    p
+}
+
+const W12: &str = "WWWWWWWWWWWW";
+
+/// A square-wrapped shape `w` wide, 100 pt high at `x` from the left margin, 40 pt down the page.
+fn square_at(x: f32) -> Float {
+    Float { wrap: Wrap::Square, h_rel: Anchor::Margin, v_rel: Anchor::Page, x, y: 40.0, ..Default::default() }
+}
+
+/// `paras` with a square-wrapped shape (`w` wide, 100 pt high at `x` from the left margin, 40 pt
+/// down the page) anchored in paragraph `anchor`.
+fn shape_doc(paras: Vec<Paragraph>, anchor: usize, x: f32, w: f32) -> Document {
+    let mut d = Document::from_text("");
+    d.body = paras.into_iter().map(wordcraft_doc::para_block).collect();
+    d.insert_object(&Pos::body(anchor, 0), rect_shape(w, 100.0, square_at(x)), &Default::default()).unwrap();
+    d
+}
+
+/// Every line of `ls` above `bottom` within `lo..hi` (one ending inside a word among them), and
+/// the first at `first`.
+fn split_in_strip(ls: &[(f32, f32, f32, bool)], first: f32, (lo, hi): (f32, f32), bottom: f32) -> bool {
+    let beside: Vec<_> = ls.iter().filter(|l| l.0 < bottom - 0.01).collect();
+    ls.first().is_some_and(|l| (l.0 - first).abs() < 0.01 && l.3) && beside.iter().all(|l| l.1 >= lo - 0.01 && l.2 <= hi + 0.01) && beside.len() >= 2
+}
+
+#[test]
+fn a_word_too_wide_for_the_only_strip_beside_a_float_is_split_across_it() {
+    // Word: beside a table or shape at the left margin 40–140 pt down leaving a 60 pt strip on its
+    // right, a word too wide for the strip is broken across it from the row it starts on, as a
+    // word too wide for a line with no float is (it used to go below the float whole). After a
+    // paragraph `ZZZ` (72–89) it starts at 89, 97 with 8 pt before; a paragraph before the table
+    // at 72; a strip on the shape's left the same; a word wider than the whole text too.
+    let table = float_table(408.0, 100.0, TableFloat { h_rel: Anchor::Margin, dist: [0.0; 4], ..on_page(40.0) });
+    for before in [0.0, 8.0] {
+        let l = lay(&spaced_doc(vec![spaced("ZZZ", 0.0), sized(W12, before)], 1, table.clone()));
+        // (Its cells start half its 0.5 pt border in from the margin, and text keeps clear of
+        // the border's outer edge.)
+        let t = table_rect(&l, 0, 1).unwrap();
+        assert!((t.right() - 480.25).abs() < 0.01, "{t:?}");
+        let ls = word_lines(&l, 2);
+        assert!(split_in_strip(&ls, 89.0 + before, (480.5, 540.0), 140.0), "table, before {before}: {ls:?}");
+
+        let l = lay(&shape_doc(vec![spaced("ZZZ", 0.0), sized(W12, before)], 1, 0.0, 408.0));
+        let ls = word_lines(&l, 1);
+        assert!(split_in_strip(&ls, 89.0 + before, (480.0, 540.0), 140.0), "shape, before {before}: {ls:?}");
+    }
+    let l = lay(&spaced_doc(vec![sized(W12, 0.0), spaced("After", 0.0)], 1, table));
+    let ls = word_lines(&l, 0);
+    assert!(split_in_strip(&ls, 72.0, (480.5, 540.0), 140.0), "before the table: {ls:?}");
+    let l = lay(&shape_doc(vec![sized(W12, 0.0)], 0, 60.0, 408.0));
+    let ls = word_lines(&l, 0);
+    assert!(split_in_strip(&ls, 72.0, (72.0, 132.0), 140.0), "strip on the left: {ls:?}");
+    let l = lay(&shape_doc(vec![sized(&"W".repeat(60), 0.0)], 0, 0.0, 408.0));
+    let ls = word_lines(&l, 0);
+    assert!(split_in_strip(&ls, 72.0, (480.0, 540.0), 140.0), "wider than the text: {ls:?}");
+}
+
+#[test]
+fn a_later_word_too_wide_for_the_strip_starts_the_next_row_split_across_it() {
+    // Word: `ab cd` stay on the first row of the 60 pt strip, the long word starts on the next
+    // one, broken across the strip, and the paragraph goes on after it.
+    let l = lay(&shape_doc(vec![sized(&format!("ab {W12} ef"), 0.0)], 0, 0.0, 408.0));
+    let ls = word_lines(&l, 0);
+    assert!(ls.first().is_some_and(|l| (l.0 - 72.0).abs() < 0.01 && !l.3 && l.1 >= 480.0 - 0.01), "{ls:?}");
+    assert!(split_in_strip(&ls[1..], 89.0, (480.0, 540.0), 140.0), "{ls:?}");
+}
+
+#[test]
+fn a_word_too_wide_for_every_strip_of_a_split_row_moves_on_row_by_row() {
+    // Word: a shape in the middle (60 pt strip on its left, 100 pt on its right, 40–145 pt down)
+    // splits each row in two. A word too wide for both moves on whole, a row (17 pt) at a time,
+    // to the first row clear of the shape (157, not 145 where the shape ends), however long it
+    // is; one that fits the right strip goes there. Text before it stays on the first row.
+    let float = Float { wrap: Wrap::Square, h_rel: Anchor::Margin, v_rel: Anchor::Page, x: 60.0, y: 40.0, ..Default::default() };
+    let doc = |text: &str, w: f32| {
+        let mut d = Document::from_text("");
+        d.body = vec![wordcraft_doc::para_block(sized(text, 0.0))];
+        d.insert_object(&Pos::body(0, 0), rect_shape(w, 105.0, float.clone()), &Default::default()).unwrap();
+        lay(&d)
+    };
+    let ls = word_lines(&doc(W12, 308.0), 0);
+    assert!(ls.first().is_some_and(|l| (l.0 - 157.0).abs() < 0.01 && (l.1 - 72.0).abs() < 0.01), "{ls:?}");
+    let ls = word_lines(&doc(&format!("ab {W12}"), 308.0), 0);
+    assert!(ls.len() == 2 && (ls[0].0 - 72.0).abs() < 0.01 && (ls[1].0 - 157.0).abs() < 0.01, "{ls:?}");
+    let ls = word_lines(&doc(&"W".repeat(60), 308.0), 0);
+    assert!(ls.first().is_some_and(|l| (l.0 - 157.0).abs() < 0.01 && l.3), "wider than the text: {ls:?}");
+    // A 208 pt right strip takes the word on the first row.
+    let ls = word_lines(&doc(W12, 200.0), 0);
+    assert!(ls.first().is_some_and(|l| (l.0 - 72.0).abs() < 0.01 && (l.1 - 332.0).abs() < 0.01 && !l.3), "{ls:?}");
+}
+
+#[test]
+fn text_goes_beside_a_float_in_a_strip_of_18_pt_or_more_whatever_the_indents() {
+    // Word: a strip 18 pt wide between a shape and the margin takes text, one 17.9 pt wide
+    // doesn't (the line goes below the shape, which ends at 140); beside a table the same. The
+    // indents don't count: an 18.5 pt strip with a 10 pt right indent still takes it, a 17 pt
+    // one on the left with a -10 pt left indent doesn't.
+    let at = |paras: Vec<Paragraph>, x: f32, w: f32| word_lines(&lay(&shape_doc(paras, 0, x, w)), 0).first().map(|l| (l.0, l.1));
+    assert_eq!(at(vec![spaced("i", 0.0)], 0.0, 450.0), Some((72.0, 522.0)));
+    assert!(at(vec![spaced("i", 0.0)], 0.0, 450.1).is_some_and(|(t, _)| t >= 140.0 - 0.01));
+    for (w, beside) in [(449.5, true), (450.5, false)] {
+        let table = float_table(w, 100.0, TableFloat { h_rel: Anchor::Margin, dist: [0.0; 4], ..on_page(40.0) });
+        let l = lay(&spaced_doc(vec![spaced("i", 0.0)], 0, table));
+        let strip = 540.0 - table_rect(&l, 0, 0).unwrap().right();
+        assert_eq!(strip >= 18.0, beside, "strip {strip}");
+        assert_eq!((top(&l, 0, 1) - 72.0).abs() < 0.01, beside, "table {w}: {}", top(&l, 0, 1));
+    }
+    let mut right = spaced("i", 0.0);
+    right.props.indent_right = Some(10.0);
+    assert!(at(vec![right], 0.0, 449.5).is_some_and(|(t, x)| (t - 72.0).abs() < 0.01 && (x - 521.5).abs() < 0.01));
+    let mut left = spaced("i", 0.0);
+    left.props.indent_left = Some(-10.0);
+    assert!(at(vec![left], 17.0, 451.0).is_some_and(|(t, _)| t >= 140.0 - 0.01));
+}
+
+#[test]
+fn a_strip_beside_an_unbordered_table_counts_from_a_little_past_its_cells() {
+    // Word, an A4 page in Word 2007 layout, a table with no style or borders (0.5 pt cell margins,
+    // as read from a document without a default table style) placed at the left margin 40 pt
+    // down, 99.25 pt high, 7.1 pt from text; the strip on its right counted from 0.75 pt past its
+    // cells. 441.6 or 442.2 pt wide (strips of 18.75 and 18.15 pt): a word too wide for the strip
+    // after the table is split across it from the first row (`i` stays there). 442.4 or 442.6 pt
+    // (17.95, 17.75): it goes below the table; 444.6 (15.75): a paragraph `ZZZ` before the table
+    // does too.
+    let word_doc = |paras: Vec<Paragraph>, at: usize, w: f32| {
+        let float = TableFloat { h_rel: Anchor::Page, x: 70.9, dist: [7.1, 0.0, 7.1, 0.0], ..on_page(40.0) };
+        let mut t = float_table(w, 99.25, float);
+        t.props.style = None;
+        t.props.cell_margins = Some([0.0, 0.5, 0.0, 0.5]);
+        let mut d = spaced_doc(paras, at, t);
+        d.settings.compat_mode = 12;
+        let s = &mut d.last_section;
+        (s.page_w, s.page_h, s.margin_left, s.margin_right, s.margin_top) = (595.3, 841.9, 70.9, 56.7, 28.35);
+        lay(&d)
+    };
+    for (w, strip) in [(441.6, 519.85), (442.2, 520.45)] {
+        let ls = word_lines(&word_doc(vec![sized(W12, 0.0), spaced("AAA", 0.0)], 0, w), 1);
+        assert!(split_in_strip(&ls, 28.35, (strip, 538.6), 139.25), "{w}: {ls:?}");
+        let l = word_doc(vec![spaced("i", 0.0), spaced("AAA", 0.0)], 0, w);
+        assert!(lines(&l, 0, 1).is_some_and(|(t, _, x)| (t - 28.35).abs() < 0.01 && (x - strip).abs() < 0.01), "{w}: {:?}", lines(&l, 0, 1));
+    }
+    for w in [442.4, 442.6] {
+        let l = word_doc(vec![sized(W12, 0.0), spaced("AAA", 0.0)], 0, w);
+        assert!((top(&l, 0, 1) - 139.25).abs() < 0.01, "{w}: {:?}", word_lines(&l, 1));
+    }
+    let l = word_doc(vec![spaced("ZZZ", 0.0), sized(W12, 0.0), spaced("AAA", 0.0)], 1, 444.6);
+    assert!((top(&l, 0, 0) - 139.25).abs() < 0.01, "444.6: ZZZ at {:?}", lines(&l, 0, 0));
+    assert!((top(&l, 0, 2) - 156.25).abs() < 0.01, "444.6: {:?}", word_lines(&l, 2));
+}
+
+#[test]
+fn a_char_wider_than_the_strip_stays_on_the_first_row_beside_its_own_shape() {
+    // Word: a 36 pt W in its own shape's 18.5 pt strip stays on the first row, past the margin:
+    // the anchor before it is neither a place to break nor the line's first item.
+    let mut p = Paragraph::with_text("W", CharProps { size: Some(36.0), ..Default::default() });
+    p.props = spaced("", 0.0).props;
+    let ls = word_lines(&lay(&shape_doc(vec![p, spaced("After", 0.0)], 0, 0.0, 449.5)), 0);
+    assert!(ls.len() == 1 && (ls[0].0 - 72.0).abs() < 0.01 && (ls[0].1 - 521.5).abs() < 0.01, "{ls:?}");
+}
+
+#[test]
+fn a_word_moving_down_a_split_row_steps_by_the_line_height() {
+    // The word too wide for both strips beside a shape in the middle (40–145 pt down) moves a
+    // line at a time, however small the exact line height: to the first row clear of the shape.
+    use wordcraft_doc::props::LineSpacing;
+    let float = Float { wrap: Wrap::Square, h_rel: Anchor::Margin, v_rel: Anchor::Page, x: 60.0, y: 40.0, ..Default::default() };
+    for (h, want) in [(0.7f32, 145.5f32), (1.0, 145.0), (1.1, 145.7), (17.0, 157.0)] {
+        let mut p = sized(W12, 0.0);
+        p.props.line_spacing = Some(LineSpacing::Exactly(h));
+        let mut d = Document::from_text("");
+        d.body = vec![wordcraft_doc::para_block(p)];
+        d.insert_object(&Pos::body(0, 0), rect_shape(308.0, 105.0, float.clone()), &Default::default()).unwrap();
+        let ls = word_lines(&lay(&d), 0);
+        assert!(ls.first().is_some_and(|l| (l.0 - want).abs() < 0.01 && (l.1 - 72.0).abs() < 0.01), "{h} pt lines: {ls:?}, not at {want}");
+    }
+    // Hostile: 0.001 pt lines (resolved to 0.7 pt, the least exact spacing) beside a shape 640 pt
+    // high step down by 0.7 pt and end up below it, whole.
+    let mut p = sized(W12, 0.0);
+    p.props.line_spacing = Some(LineSpacing::Exactly(0.001));
+    let mut d = Document::from_text("");
+    d.body = vec![wordcraft_doc::para_block(p)];
+    d.insert_object(&Pos::body(0, 0), rect_shape(308.0, 640.0, float), &Default::default()).unwrap();
+    let ls = word_lines(&lay(&d), 0);
+    assert!(ls.first().is_some_and(|l| l.0 >= 680.0 - 0.01 && l.0 < 681.0 && !l.3), "{ls:?}");
+}
+
+#[test]
+fn a_word_moving_down_a_split_row_steps_at_most_2000_rows_beside_one_object() {
+    // A shape 3970 pt high (40–4010 pt down a 4100 pt page) is 5671 lines of 0.7 pt: the word too
+    // wide for both strips steps down 2000 rows of 0.7 pt beside it, then goes straight below it,
+    // at its bottom (stepping on would put it at 4010.2), whole.
+    use wordcraft_doc::props::LineSpacing;
+    let float = Float { wrap: Wrap::Square, h_rel: Anchor::Margin, v_rel: Anchor::Page, x: 60.0, y: 40.0, ..Default::default() };
+    let mut p = sized(W12, 0.0);
+    p.props.line_spacing = Some(LineSpacing::Exactly(0.7));
+    let mut d = Document::from_text("");
+    d.body = vec![wordcraft_doc::para_block(p)];
+    d.last_section.page_h = 4100.0;
+    d.insert_object(&Pos::body(0, 0), rect_shape(308.0, 3970.0, float), &Default::default()).unwrap();
+    let ls = word_lines(&lay(&d), 0);
+    assert!(ls.first().is_some_and(|l| (l.0 - 4010.0).abs() < 0.01 && (l.1 - 72.0).abs() < 0.01 && !l.3), "{ls:?}");
 }
 
 fn multiple(text: &str, m: f32) -> Paragraph {

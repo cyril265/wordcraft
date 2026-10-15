@@ -1829,8 +1829,15 @@ pub fn layout_para(p: &Paragraph, env: &ParaEnv) -> ParaLayout {
     // Asian typography: kinsoku and breaking Latin words anywhere.
     crate::kinsoku::apply(&text, &mut found, rp.kinsoku, rp.word_wrap);
     let opps: std::collections::HashSet<usize> = found.into_iter().filter_map(to_para).collect();
+    // A floating object's anchor takes no room and is no place to break a line (Word splits a word
+    // too long for the strip beside its own object from the first row on).
+    let floating = |k: usize| p.objects.get(k).and_then(|o| o.frame()).is_some_and(|(_, _, f)| f.wrap != wordcraft_doc::para::Wrap::Inline);
     for c in &mut b.clusters {
-        c.break_after = opps.contains(&c.end) || matches!(c.kind, ClKind::Object(_) | ClKind::Tab);
+        c.break_after = match c.kind {
+            ClKind::Object(k) => !floating(k),
+            ClKind::Tab => true,
+            _ => opps.contains(&c.end),
+        };
     }
 
     // Word hides a list label on a paragraph containing only a page break. The list counter
@@ -2064,6 +2071,11 @@ fn break_lines(pl: &mut ParaLayout, env: &ParaEnv, mark_style: u32, level: Optio
     let mut skipped = 0;
     // A left tab past the right indent that wrapped to start the next line.
     let mut wrapped_tab: Option<usize> = None;
+    // The bottom of the lowest object an empty row last stepped down beside, and how many rows
+    // it stepped beside it (see `MAX_ROW_STEPS`).
+    let mut row_steps: (Option<f32>, usize) = (None, 0);
+    // The current row has more than one span (text on both sides of a floating object).
+    let mut row_multi = false;
     // The height a row is checked against floating objects with, when a line laid out on it
     // turned out taller than estimated (see `need`), and how many times it was laid out again.
     let mut row_need = 0.0f32;
@@ -2074,9 +2086,6 @@ fn break_lines(pl: &mut ParaLayout, env: &ParaEnv, mark_style: u32, level: Optio
     loop {
         // A line already sits on this row (a span before this one may have been skipped).
         let beside = !row_rest.is_empty() && lines.len() > row_first;
-        // The span is narrowed by a floating object.
-        let mut narrowed = !row_rest.is_empty();
-        let row_lo = if first { first_left } else { rp.indent_left };
         let (left, right_edge) = if let Some(span) = row_rest.pop_front() {
             span
         } else {
@@ -2091,9 +2100,9 @@ fn break_lines(pl: &mut ParaLayout, env: &ParaEnv, mark_style: u32, level: Optio
                     lo = first_left.max(rp.indent_left) + dw;
                 }
                 row_lo_used = Some(lo);
-                match row_spans(exclusions, top, est_clear.max(row_need), lo, base_right).map(|mut spans| (spans.pop_front(), spans)) {
+                match row_spans(exclusions, top, est_clear.max(row_need), (lo, base_right), width).map(|mut spans| (spans.pop_front(), spans)) {
                     Ok((Some((a, b)), rest)) => {
-                        narrowed = !rest.is_empty() || a > lo || b < base_right;
+                        row_multi = !rest.is_empty();
                         row_rest = rest;
                         row_first = lines.len();
                         break (a, b.max(a + MIN_LINE_WIDTH));
@@ -2104,6 +2113,7 @@ fn break_lines(pl: &mut ParaLayout, env: &ParaEnv, mark_style: u32, level: Optio
                         guard += 1;
                     }
                     Ok((None, _)) | Err(_) => {
+                        row_multi = false;
                         row_first = lines.len();
                         break (lo, base_right.max(lo + MIN_LINE_WIDTH));
                     }
@@ -2135,7 +2145,7 @@ fn break_lines(pl: &mut ParaLayout, env: &ParaEnv, mark_style: u32, level: Optio
         }
         let line_start_x = x;
         let c0 = i;
-        // The first word doesn't fit a span narrowed by a floating object: it moves on whole.
+        // The first word doesn't fit a span of a row split by a floating object: it moves on whole.
         let mut skip = false;
         let mut xs: Vec<f32> = Vec::new();
         let mut leaders = Vec::new();
@@ -2272,21 +2282,10 @@ fn break_lines(pl: &mut ParaLayout, env: &ParaEnv, mark_style: u32, level: Optio
                     // Recompute x for the kept clusters.
                     x = xs.last().copied().unwrap_or(line_start_x) + pl.clusters.get(bk).map(|c| c.adv).unwrap_or(0.0);
                 } else {
-                    // No opportunity: break here (a long word), unless the span is beside a
-                    // floating object and the word fits the full line; then it tries the row's
-                    // next span, or the next row. The word runs to the next break that isn't a
-                    // hyphenation point.
-                    let word: f32 = (c0..n)
-                        .filter_map(|k| pl.clusters.get(k).map(|c| (k, c)))
-                        .scan(false, |done, (k, c)| {
-                            let end = c.break_after && pl.hyph_after.binary_search(&(k as u32)).is_err();
-                            (!std::mem::replace(done, end)).then_some(c)
-                        })
-                        .filter(|c| c.kind != ClKind::Space)
-                        .map(|c| c.adv)
-                        .sum();
-                    let full = base_right - row_lo;
-                    skip = narrowed && skipped < 50 && word <= full + 0.01;
+                    // No opportunity: break here (a long word), as Word does in a row's only span
+                    // beside a floating object too. In a row with text on both sides of one the
+                    // word tries the row's next span instead, or the next row, however long it is.
+                    skip = row_multi && skipped < MAX_SKIPS;
                     // Never split a ligature's letters across lines: the glyph sits on the first
                     // letter, so back up to it (unless it starts the line).
                     let glyphless = |k: usize| pl.clusters.get(k).is_some_and(|c| c.kind == ClKind::Text && c.g1 <= c.g0);
@@ -2379,16 +2378,22 @@ fn break_lines(pl: &mut ParaLayout, env: &ParaEnv, mark_style: u32, level: Optio
         if skip {
             skipped += 1;
             if row_rest.is_empty() {
-                top = if lines.len() > row_first {
-                    top + even_row(lines.get_mut(row_first..).unwrap_or_default())
+                top += if lines.len() > row_first {
+                    even_row(lines.get_mut(row_first..).unwrap_or_default())
                 } else {
-                    // Nothing on this row: go below the first object that ends, as when no span is wide enough.
-                    exclusions
-                        .iter()
-                        .filter(|e| e.bottom > top && e.top < top + est_h && e.right > row_lo && e.left < base_right)
-                        .map(|e| e.bottom)
-                        .reduce(f32::min)
-                        .unwrap_or(top + est_h)
+                    // Nothing on this row: the next row, a line lower (Word); after
+                    // MAX_ROW_STEPS rows beside the same lowest object, straight below it.
+                    let line = match rp.line_spacing {
+                        LineSpacing::Exactly(v) if v.is_finite() && v > 0.0 => v,
+                        LineSpacing::AtLeast(v) if v.is_finite() => v.max(est_h.max(row_need)),
+                        _ => est_h.max(row_need),
+                    };
+                    let lowest = exclusions.iter().filter(|e| e.bottom > top && e.top < top + est_h).map(|e| e.bottom).fold(top, f32::max);
+                    if row_steps.0 != Some(lowest) {
+                        row_steps = (Some(lowest), 0);
+                    }
+                    row_steps.1 += 1;
+                    if row_steps.1 >= MAX_ROW_STEPS { line.max(lowest - top) } else { line }
                 };
             }
             continue;
@@ -2601,7 +2606,7 @@ fn break_lines(pl: &mut ParaLayout, env: &ParaEnv, mark_style: u32, level: Optio
         if let Some(lo) = row_lo_used
             && need > checked + 0.01
             && retries < 8
-            && row_spans(exclusions, top, need, lo, base_right) != row_spans(exclusions, top, checked, lo, base_right)
+            && row_spans(exclusions, top, need, (lo, base_right), width) != row_spans(exclusions, top, checked, (lo, base_right), width)
         {
             let restart = lines.get(row_first).map_or(c0, |l| l.c0);
             lines.truncate(row_first);
@@ -2673,7 +2678,7 @@ fn break_lines(pl: &mut ParaLayout, env: &ParaEnv, mark_style: u32, level: Optio
                 // after (Word): below one in its way, or in the first strip beside it.
                 let mut span = (rp.indent_left, base_right);
                 for _ in 0..50 {
-                    match row_spans(exclusions, top, clear + env.wrap_after.max(0.0), rp.indent_left, base_right) {
+                    match row_spans(exclusions, top, clear + env.wrap_after.max(0.0), (rp.indent_left, base_right), width) {
                         Err(below) if below > top => top = below,
                         Ok(spans) => {
                             span = spans.front().copied().unwrap_or(span);
@@ -2819,9 +2824,20 @@ fn reorder_line(pl: &ParaLayout, line: &mut Line, width: f32) {
     line.xs = line.vis.iter().map(|v| v.x).chain(std::iter::once(end)).collect();
 }
 
-/// Narrowest span text flows into beside a floating object, points. Word puts an empty
-/// paragraph beside a floating table in a 21.3pt gap but not in an 18.6pt one.
-const MIN_SPAN: f32 = 20.0;
+/// Narrowest span text flows into beside a floating object, points, measured between the object
+/// and the margin whatever the paragraph's indents. Word puts text (or an empty paragraph) beside
+/// a floating table or shape in an 18 pt gap but not in a 17.9 pt one, whatever its font size.
+const MIN_SPAN: f32 = 18.0;
+
+/// Most rows a line steps down beside the floating objects of a split row while the same one is
+/// the lowest beside it: each row a line lower, the last one straight below that object (only
+/// beside an object taller than this many lines).
+const MAX_ROW_STEPS: usize = 2000;
+
+/// How many spans a line may skip while looking for one its first word fits, rows stepped down
+/// included: a backstop that only guarantees progress (past it the word is broken where it is,
+/// as in a row's only span, which Word doesn't do in a split row).
+const MAX_SKIPS: usize = 50_000;
 
 /// How far below a line's top its baseline sits. Multiple spacing at or above single keeps the
 /// text at the top of the line and puts the extra leading below the baseline; below single it
@@ -2838,7 +2854,7 @@ fn baseline_offset(spacing: LineSpacing, asc: f32, height: f32, desc: f32) -> f3
 /// The spans of a row at `top` (about `h` tall) between `lo` and `hi` that text can use around
 /// the exclusions, left to right (Square wrapping uses both sides of an object). `Err(y)`: none
 /// here, try again at `y` (below what's in the way).
-fn row_spans(exclusions: &[Exclusion], top: f32, h: f32, lo: f32, hi: f32) -> Result<VecDeque<(f32, f32)>, f32> {
+fn row_spans(exclusions: &[Exclusion], top: f32, h: f32, (lo, hi): (f32, f32), width: f32) -> Result<VecDeque<(f32, f32)>, f32> {
     let here: Vec<&Exclusion> = exclusions.iter().filter(|e| e.bottom > top && e.top < top + h && e.right > lo && e.left < hi).collect();
     if let Some(below) = here.iter().filter(|e| e.top_bottom).map(|e| e.bottom).reduce(f32::max) {
         return Err(below);
@@ -2869,14 +2885,17 @@ fn row_spans(exclusions: &[Exclusion], top: f32, h: f32, lo: f32, hi: f32) -> Re
     if taken.is_empty() {
         return Ok(VecDeque::from([(lo, hi)]));
     }
-    let mut spans = vec![(lo, hi)];
+    // Spans are wide enough between the objects and the margins (0 and `width`); the text's room
+    // in them ends at the indents.
+    let mut spans = vec![(lo.min(0.0), hi.max(width))];
     for &(left, right, _) in &taken {
         spans = spans
             .into_iter()
             .flat_map(|(a, b)| if right <= a || left >= b { vec![(a, b)] } else { vec![(a, left.min(b)), (right.max(a), b)] })
             .collect();
     }
-    spans.retain(|(a, b)| b - a >= MIN_SPAN);
+    spans.retain(|(a, b)| b.min(width) - a.max(0.0) >= MIN_SPAN - 0.01);
+    let spans: Vec<(f32, f32)> = spans.into_iter().map(|(a, b)| (a.max(lo), b.min(hi))).filter(|(a, b)| b > a).collect();
     if spans.is_empty() {
         // Nothing wide enough: the line goes below the first object that ends.
         return Err(taken.iter().map(|t| t.2).reduce(f32::min).unwrap_or(top));
