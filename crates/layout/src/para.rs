@@ -445,6 +445,9 @@ pub struct ParaEnv<'a> {
     /// Room below the paragraph's last line kept clear of `exclusions`: its space after (Word
     /// moves a last line whose space after reaches a floating object below or beside it).
     pub wrap_after: f32,
+    /// The paragraph's space before, kept between a floating object its first line moves below
+    /// and that line (Word).
+    pub wrap_before: f32,
     /// Automatic equation numbers used before this paragraph.
     pub eq_number: u32,
     pub read_line_spacing: Option<f32>,
@@ -2096,7 +2099,8 @@ fn break_lines(pl: &mut ParaLayout, env: &ParaEnv, mark_style: u32, level: Optio
                         break (a, b.max(a + MIN_LINE_WIDTH));
                     }
                     Err(below) if below > top && guard < 50 => {
-                        top = below;
+                        // The first line keeps the paragraph's space before below the object.
+                        top = below + if lines.is_empty() { env.wrap_before.max(0.0) } else { 0.0 };
                         guard += 1;
                     }
                     Ok((None, _)) | Err(_) => {
@@ -3296,6 +3300,7 @@ mod label_spacing_tests {
             grid: Grid::default(),
             exclusions: &[],
             wrap_after: 0.0,
+            wrap_before: 0.0,
             eq_number: 0,
             numeral: crate::NumeralMode::default(),
             read_line_spacing: None,

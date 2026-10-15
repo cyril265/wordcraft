@@ -1009,6 +1009,36 @@ fn an_empty_paragraph_below_a_box_its_paragraph_before_anchors_keeps_only_its_ow
     }
 }
 
+#[test]
+fn a_paragraph_moved_below_a_floating_table_or_shape_keeps_its_space_before_there() {
+    // Word: a paragraph with 8 pt before whose first line would land on a table at 92 (or on its
+    // own shape placed there) starts 8 pt below it; with no space before, right below it. A
+    // paragraph that fits where it is keeps its space before above it as usual.
+    for before in [8.0, 0.0] {
+        let mut next = spaced("After the table", 0.0);
+        next.props.space_before = Some(before);
+        let l = lay(&spaced_doc(vec![spaced("Before", 0.0), next], 1, float_table(612.0, 100.0, on_page(92.0))));
+        let table = table_rect(&l, 0, 1).unwrap();
+        let t = top(&l, 0, 2);
+        assert!((t - (table.bottom() + before)).abs() < 0.01, "before {before}: at {t}, table ends {}", table.bottom());
+
+        let float = Float { wrap: Wrap::TopAndBottom, h_rel: Anchor::Page, v_rel: Anchor::Page, y: 92.0, ..Default::default() };
+        let mut anchor = spaced("Anchor", 0.0);
+        anchor.props.space_before = Some(before);
+        let mut d = Document::from_text("");
+        d.body = [spaced("Before", 0.0), anchor].into_iter().map(wordcraft_doc::para_block).collect();
+        d.insert_object(&Pos::body(1, 0), rect_shape(612.0, 100.0, float), &Default::default()).unwrap();
+        let l = lay(&d);
+        let shape = shapes(&l.pages[0].items)[0];
+        let t = top(&l, 0, 1);
+        assert!((t - (shape.bottom() + before)).abs() < 0.01, "before {before}: at {t}, shape ends {}", shape.bottom());
+    }
+    let mut next = spaced("After", 0.0);
+    next.props.space_before = Some(8.0);
+    let l = lay(&spaced_doc(vec![spaced("Before", 0.0), next], 1, float_table(612.0, 100.0, on_page(300.0))));
+    assert!((top(&l, 0, 2) - 97.0).abs() < 0.01, "{}", top(&l, 0, 2));
+}
+
 fn multiple(text: &str, m: f32) -> Paragraph {
     use wordcraft_doc::props::LineSpacing;
     let mut p = spaced(text, 0.0);

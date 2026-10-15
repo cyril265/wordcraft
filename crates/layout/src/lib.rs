@@ -843,6 +843,7 @@ impl Ctx<'_> {
             numeral: self.opts.numeral,
             exclusions: &[],
             wrap_after: 0.0,
+            wrap_before: 0.0,
             eq_number: 0,
             read_line_spacing: None,
             grid: para::Grid::default(),
@@ -880,21 +881,22 @@ impl Ctx<'_> {
         exclusions: &[para::Exclusion],
         label: Option<(String, Level)>,
     ) -> Arc<ParaLayout> {
-        self.para_wrapped(p, width, table, (exclusions, 0.0), label)
+        self.para_wrapped(p, width, table, (exclusions, (0.0, 0.0)), label)
     }
 
-    /// [`Ctx::para_labelled`] around `exclusions`, its last line keeping `wrap_after` below it
-    /// clear of them (see [`para::ParaEnv::wrap_after`]).
+    /// [`Ctx::para_labelled`] around `exclusions`, keeping its space before below one its first
+    /// line moves under and its last line its space after clear of them (`wrap`: before, after;
+    /// see [`para::ParaEnv::wrap_after`]).
     fn para_wrapped(
         &mut self,
         p: &Paragraph,
         width: f32,
         table: Option<&para::CellText>,
-        (exclusions, wrap_after): (&[para::Exclusion], f32),
+        (exclusions, wrap): (&[para::Exclusion], (f32, f32)),
         label: Option<(String, Level)>,
     ) -> Arc<ParaLayout> {
         let fitted = self.fitted_boxes(p);
-        let (key, eq_number) = self.para_key(p, width, table, (exclusions, wrap_after), label.as_ref(), &fitted);
+        let (key, eq_number) = self.para_key(p, width, table, (exclusions, wrap), label.as_ref(), &fitted);
         self.cache.used.insert(key.clone());
         if let Some(pl) = self.cache.paras.get(&key) {
             self.cache.hits += 1;
@@ -902,7 +904,7 @@ impl Ctx<'_> {
         }
         self.cache.misses += 1;
         let typing = key.typing;
-        let pl = Arc::new(para::layout_para(p, &self.para_env(width, label, table, (exclusions, wrap_after), eq_number, typing, &fitted)));
+        let pl = Arc::new(para::layout_para(p, &self.para_env(width, label, table, (exclusions, wrap), eq_number, typing, &fitted)));
         self.cache.paras.insert(key, pl.clone());
         pl
     }
@@ -919,7 +921,7 @@ impl Ctx<'_> {
         measure: impl FnOnce(&ParaLayout) -> (f32, f32),
     ) -> (f32, f32) {
         let fitted = self.fitted_boxes(p);
-        let (key, eq_number) = self.para_key(p, width, table, (&[], 0.0), label.as_ref(), &fitted);
+        let (key, eq_number) = self.para_key(p, width, table, (&[], (0.0, 0.0)), label.as_ref(), &fitted);
         self.cache.used.insert(key.clone());
         if let Some(m) = self.cache.measures.get(&key) {
             self.cache.hits += 1;
@@ -927,7 +929,7 @@ impl Ctx<'_> {
         }
         self.cache.misses += 1;
         let typing = key.typing;
-        let m = measure(&para::layout_para(p, &self.para_env(width, label, table, (&[], 0.0), eq_number, typing, &fitted)));
+        let m = measure(&para::layout_para(p, &self.para_env(width, label, table, (&[], (0.0, 0.0)), eq_number, typing, &fitted)));
         self.cache.measures.insert(key, m);
         m
     }
@@ -964,7 +966,7 @@ impl Ctx<'_> {
         p: &Paragraph,
         width: f32,
         table: Option<&para::CellText>,
-        (exclusions, wrap_after): (&[para::Exclusion], f32),
+        (exclusions, (wrap_before, wrap_after)): (&[para::Exclusion], (f32, f32)),
         label: Option<&(String, Level)>,
         fitted: &[(usize, f32)],
     ) -> (Key, u32) {
@@ -991,7 +993,7 @@ impl Ctx<'_> {
             page,
             table: table.map(|t| self.table_key(t)).unwrap_or(0),
             notes: if p.objects.iter().any(|o| matches!(o, InlineObject::NoteRef { .. })) { self.notes_hash } else { 0 },
-            excl: if exclusions.is_empty() { 0 } else { hash_of(&format!("{exclusions:?}{}", wrap_after.to_bits())) },
+            excl: if exclusions.is_empty() { 0 } else { hash_of(&format!("{exclusions:?}{}|{}", wrap_before.to_bits(), wrap_after.to_bits())) },
             eq: if eq_here > 0 { eq_number } else { 0 },
             read_spacing: if self.opts.view == ViewMode::Read { self.opts.read_line_spacing.map(f32::to_bits) } else { None },
             grid: self.grid.key(),
@@ -1024,7 +1026,7 @@ impl Ctx<'_> {
         width: f32,
         label: Option<(String, Level)>,
         table: Option<&'b para::CellText>,
-        (exclusions, wrap_after): (&'b [para::Exclusion], f32),
+        (exclusions, (wrap_before, wrap_after)): (&'b [para::Exclusion], (f32, f32)),
         eq_number: u32,
         typing_word: Option<(usize, usize)>,
         fitted: &'b [(usize, f32)],
@@ -1043,6 +1045,7 @@ impl Ctx<'_> {
             numeral: self.opts.numeral,
             exclusions,
             wrap_after: if exclusions.is_empty() { 0.0 } else { wrap_after },
+            wrap_before: if exclusions.is_empty() { 0.0 } else { wrap_before },
             eq_number,
             read_line_spacing: if self.opts.view == ViewMode::Read { self.opts.read_line_spacing } else { None },
             grid: self.grid,
@@ -3474,7 +3477,7 @@ fn anchor_floats(
         }
     }
     let rel = rel_exclusions(&body_wraps(ctx, pb), col_x, y0);
-    let pl = ctx.para_wrapped(p, width, None, (&rel, wrap_after), label.clone());
+    let pl = ctx.para_wrapped(p, width, None, (&rel, (before, wrap_after)), label.clone());
     (rects, pl, rel)
 }
 
@@ -3811,6 +3814,8 @@ fn place_para_in_flow(ctx: &mut Ctx, pb: &mut PageBuilder, p: &Paragraph, block:
     // Where its automatic equation numbers start: each layout of it again counts from here.
     let eq_start = ctx.eq_count;
     let (mut float_rects, mut pl, mut rel) = anchor_floats(ctx, pb, p, block, guess, space_before, excl_mark, (&label, wrap_after), true);
+    // The space before it was laid out with (kept below a floating object its first line moves under).
+    let mut wrap_before = space_before;
     // The page the floating objects were placed on (by index).
     let mut float_page = pb.pages.len().saturating_sub(1);
     // The page its fields were laid out for (and the width), and how many times it was laid out again for a later
@@ -3906,6 +3911,7 @@ fn place_para_in_flow(ctx: &mut Ctx, pb: &mut PageBuilder, p: &Paragraph, block:
         let y0 = pb.y;
         (float_rects, pl, rel) =
             again(ctx, eq_start, |ctx| anchor_floats(ctx, pb, p, block, y0, applied_before, excl_mark, (&label, wrap_after), true));
+        wrap_before = applied_before;
         float_page = pb.pages.len().saturating_sub(1);
         (laid_page, laid_width) = (pb.number, pb.col_w());
         anchor_y = y0 - applied_before;
@@ -3930,7 +3936,7 @@ fn place_para_in_flow(ctx: &mut Ctx, pb: &mut PageBuilder, p: &Paragraph, block:
                 #[cfg(test)]
                 WRAP_RELAYS.with(|c| c.set(c.get() + 1));
                 let relaid = with_page_map(ctx, &mut page_map, |ctx| {
-                    again(ctx, eq_start, |ctx| ctx.para_wrapped(p, laid_width, None, (&here, wrap_after), label.clone()))
+                    again(ctx, eq_start, |ctx| ctx.para_wrapped(p, laid_width, None, (&here, (wrap_before, wrap_after)), label.clone()))
                 });
                 // Only if the rest still starts at the same line, at the same height (an outline
                 // reaching above it could move the lines before down, and the column's areas with them).
@@ -3959,7 +3965,7 @@ fn place_para_in_flow(ctx: &mut Ctx, pb: &mut PageBuilder, p: &Paragraph, block:
             page_map.push((resume, pb.number));
             ctx.fields.page = laid_page;
             let relaid = with_page_map(ctx, &mut page_map, |ctx| {
-                again(ctx, eq_start, |ctx| ctx.para_wrapped(p, laid_width, None, (&rel, wrap_after), label.clone()))
+                again(ctx, eq_start, |ctx| ctx.para_wrapped(p, laid_width, None, (&rel, (wrap_before, wrap_after)), label.clone()))
             });
             match relaid.lines.iter().position(|l| l.start == resume) {
                 Some(k) => {
@@ -4085,6 +4091,7 @@ fn place_para_in_flow(ctx: &mut Ctx, pb: &mut PageBuilder, p: &Paragraph, block:
                     let y0 = pb.y;
                     (float_rects, pl, rel) =
                         again(ctx, eq_start, |ctx| anchor_floats(ctx, pb, p, block, y0, 0.0, excl_mark, (&label, wrap_after), true));
+                    wrap_before = 0.0;
                     float_page = pb.pages.len().saturating_sub(1);
                     (laid_page, laid_width) = (pb.number, pb.col_w());
                     anchor_y = y0;
@@ -4214,6 +4221,7 @@ fn place_para_in_flow(ctx: &mut Ctx, pb: &mut PageBuilder, p: &Paragraph, block:
                     if let Some(k) = relaid.lines.iter().position(|l| l.start == resume) {
                         (float_rects, pl, rel) = (rects, relaid, relaid_rel);
                         float_page = pb.pages.len().saturating_sub(1);
+                        wrap_before = 0.0;
                         (laid_page, laid_width) = (pb.number, pb.col_w());
                         anchor_y = y0;
                         n = pl.lines.len();
@@ -4381,6 +4389,7 @@ fn next_first_line(ctx: &mut Ctx, block: usize, width: f32, depth: usize, counte
                 numeral: ctx.opts.numeral,
                 exclusions: &[],
                 wrap_after: 0.0,
+                wrap_before: 0.0,
                 eq_number: ctx.eq_count,
                 read_line_spacing: if ctx.opts.view == ViewMode::Read { ctx.opts.read_line_spacing } else { None },
                 grid: ctx.grid,

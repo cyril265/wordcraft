@@ -202,6 +202,7 @@ pub fn measure_table_columns(doc: &wordcraft_doc::Document, t: &Table) -> Vec<(f
                 numeral: crate::NumeralMode::default(),
                 exclusions: &[],
                 wrap_after: 0.0,
+                wrap_before: 0.0,
                 eq_number: 0,
                 read_line_spacing: None,
                 grid: crate::para::Grid::default(),
