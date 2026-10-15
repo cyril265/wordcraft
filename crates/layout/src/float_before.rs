@@ -147,8 +147,9 @@ fn is_table(doc: &Document, block: usize) -> bool {
     matches!(doc.body.get(block).map(|b| &**b), Some(Block::Table(_)))
 }
 
-/// The body blocks before `before` with lines on `page` that one of `areas` lands on.
-fn covered<'p>(page: &'p Page, areas: &'p [WrapArea], before: usize) -> impl Iterator<Item = usize> + 'p {
+/// The body blocks before `before` with lines on `page` that one of `areas` lands on, a
+/// paragraph's last line with its space after.
+fn covered<'p>(ctx: &'p Ctx, page: &'p Page, areas: &'p [WrapArea], before: usize) -> impl Iterator<Item = usize> + 'p {
     page.items.iter().filter_map(move |it| {
         let Placed::Lines { story: StoryRef::Body, path, para, l0, l1, x, y, .. } = it else { return None };
         let block = usize::try_from(*path.0.first()?).ok()?;
@@ -158,21 +159,29 @@ fn covered<'p>(page: &'p Page, areas: &'p [WrapArea], before: usize) -> impl Ite
         let lines = para.lines.get(*l0..*l1)?;
         // `y` is where the first of them starts.
         let first = lines.first()?.top;
+        // Before Word 2013 layout a paragraph's last line keeps its space after clear of
+        // floating objects too.
+        let after =
+            if path.0.len() == 1 && *l1 == para.lines.len() { space_after_clear_of_floats(ctx, block, &para.rp, para.label.is_some()) } else { 0.0 };
+        let last = lines.len().saturating_sub(1);
         lines
             .iter()
-            .any(|l| {
-                let r = Rect::new(x + l.left, y + l.top - first, (l.right - l.left).max(1.0), l.height);
+            .enumerate()
+            .any(|(k, l)| {
+                let h = l.height + if k == last { after } else { 0.0 };
+                let r = Rect::new(x + l.left, y + l.top - first, (l.right - l.left).max(1.0), h);
                 areas.iter().any(|(area, ..)| r.intersects(area))
             })
             .then_some(block)
     })
 }
 
-/// The first block on `page` before `placed` whose lines it lands on, from `kept_from` on (the
-/// first block whose state is kept; the lines of the floating tables placed there don't count).
-fn first_covered(doc: &Document, page: &Page, placed: &PlacedFloat, (floats, kept_from): (&[PlacedFloat], usize)) -> Option<usize> {
-    covered(page, &placed.areas, placed.block)
-        .filter(|block| *block >= kept_from && !(is_table(doc, *block) && floats.iter().any(|f| f.block == *block)))
+/// The first block on `page` before `placed` whose lines it lands on, a paragraph's last line
+/// with its space after, from `kept_from` on (the first block whose state is kept; the lines of
+/// the floating tables placed there don't count).
+fn first_covered(ctx: &Ctx, page: &Page, placed: &PlacedFloat, (floats, kept_from): (&[PlacedFloat], usize)) -> Option<usize> {
+    covered(ctx, page, &placed.areas, placed.block)
+        .filter(|block| *block >= kept_from && !(is_table(ctx.doc, *block) && floats.iter().any(|f| f.block == *block)))
         .min()
 }
 
@@ -180,9 +189,9 @@ fn first_covered(doc: &Document, page: &Page, placed: &PlacedFloat, (floats, kep
 /// object kept where it was: `before` is the first block this walk lays out again, so that text is
 /// an earlier section's on the page (the walk restarts at a section) or a block's that started more
 /// than a page back. The lines of floating tables don't count.
-pub(crate) fn text_under(doc: &Document, page: &Page, before: usize, area: &WrapArea) -> bool {
-    covered(page, std::slice::from_ref(area), before)
-        .any(|b| !matches!(doc.body.get(b).map(|b| &**b), Some(Block::Table(t)) if t.props.float.is_some()))
+pub(crate) fn text_under(ctx: &Ctx, page: &Page, before: usize, area: &WrapArea) -> bool {
+    covered(ctx, page, std::slice::from_ref(area), before)
+        .any(|b| !matches!(ctx.doc.body.get(b).map(|b| &**b), Some(Block::Table(t)) if t.props.float.is_some()))
 }
 
 /// Place body block `block` (a floating table at the place `floats` gives it, a paragraph's
@@ -246,7 +255,7 @@ pub(crate) fn wrap_text_before<'a>(
     blocks.floats.push(placed);
     let Some(placed) = blocks.floats.last() else { return 0 };
     let Some(from) =
-        pb.pages.get(page).and_then(|pg| first_covered(ctx.doc, pg, placed, (&blocks.floats, blocks.kept.first().map_or(usize::MAX, |(b, _)| *b))))
+        pb.pages.get(page).and_then(|pg| first_covered(ctx, pg, placed, (&blocks.floats, blocks.kept.first().map_or(usize::MAX, |(b, _)| *b))))
     else {
         return 0;
     };

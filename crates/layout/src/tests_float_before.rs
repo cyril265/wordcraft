@@ -616,3 +616,473 @@ fn text_before_floats_is_laid_out_again_for_at_most_16_floats_on_a_page_across_s
         assert!(before >= shape.bottom() - 0.01, "section {k}: paragraph before at {before}, shape {shape:?}");
     }
 }
+
+// A paragraph's last line keeps its space after clear of floating tables and objects before Word
+// 2013 layout (Word for Mac, exact 17 pt lines, documents without settings, so compatibility mode
+// 12: one whose line bottom plus space after reaches a float's top goes below it, or beside a
+// narrow one; the line alone decides for the other lines). In Word 2013 layout only the line does.
+
+/// `doc` laid out in compatibility mode 12 (Word 2007), like the documents measured in Word.
+fn lay_12(doc: &Document) -> DocLayout {
+    let mut d = doc.clone();
+    d.settings.compat_mode = wordcraft_doc::LEGACY_COMPAT_MODE;
+    lay(&d)
+}
+
+/// A paragraph of `text` with exact 17 pt lines, no space before and `after` after.
+fn spaced(text: &str, after: f32) -> Paragraph {
+    use wordcraft_doc::props::LineSpacing;
+    let mut p = Paragraph::with_text(text, Default::default());
+    p.props.line_spacing = Some(LineSpacing::Exactly(17.0));
+    p.props.space_before = Some(0.0);
+    p.props.space_after = Some(after);
+    p
+}
+
+/// Body paragraphs `paras` with floating table `t` inserted before paragraph `at`.
+fn spaced_doc(paras: Vec<Paragraph>, at: usize, t: Table) -> Document {
+    let mut d = Document::from_text("");
+    d.body = paras.into_iter().map(wordcraft_doc::para_block).collect();
+    d.insert_block(StoryRef::Body, &Path::top(at), Block::Table(t)).unwrap();
+    d
+}
+
+#[test]
+fn a_last_line_whose_space_after_reaches_a_floating_table_goes_below_it() {
+    // Word: line 72–89, 8 pt after; a table at 97.5 leaves it (89 + 8 = 97 fits), one at 96.5
+    // takes it below; with no space after, one at 89.5 leaves it too. Swept around the boundary.
+    for (after, y, stays) in [(8.0, 97.5, true), (8.0, 96.5, false), (8.0, 90.0, false), (0.0, 89.5, true), (4.0, 93.5, true), (4.0, 92.5, false)] {
+        let l = lay_12(&spaced_doc(vec![spaced("Before", after), spaced("After", 0.0)], 1, float_table(612.0, 100.0, on_page(y))));
+        let table = table_rect(&l, 0, 1).unwrap();
+        let t = top(&l, 0, 0);
+        if stays {
+            assert!((t - 72.0).abs() < 0.01, "after {after}, table at {y}: moved to {t}");
+        } else {
+            assert!(t >= table.bottom() - 0.01, "after {after}, table at {y}: at {t}, table ends {}", table.bottom());
+        }
+    }
+}
+
+#[test]
+fn only_the_last_line_of_a_paragraph_keeps_its_space_after_clear() {
+    // Word: a two-line paragraph (72–89–106, 8 pt after) and a table at 110: the first line stays,
+    // the last goes below the table; with no space after both stay.
+    // (Two lines by a line break, whatever the font.)
+    for (after, moves) in [(8.0, true), (0.0, false)] {
+        let l =
+            lay_12(&spaced_doc(vec![spaced("First line\nSecond line", after), spaced("After", 0.0)], 1, float_table(612.0, 100.0, on_page(110.0))));
+        let lines = l.pages[0].items.iter().find_map(|it| match it {
+            Placed::Lines { story: StoryRef::Body, path, para, .. } if path.0 == [0] => Some(para.lines.len()),
+            _ => None,
+        });
+        assert_eq!(lines, Some(2), "two lines");
+        let (first, last) = (lines_at(&l, 0, 0, 0), lines_at(&l, 0, 0, 1));
+        assert!((first - 72.0).abs() < 0.01, "after {after}: first line at {first}");
+        if moves {
+            assert!(last >= 210.0 - 0.01, "after {after}: last line at {last}");
+        } else {
+            assert!((last - 89.0).abs() < 0.01, "after {after}: last line at {last}");
+        }
+    }
+}
+
+/// The top of line `k` of top-level body block `block` on page `page`.
+fn lines_at(l: &DocLayout, page: usize, block: u32, k: usize) -> f32 {
+    l.pages[page]
+        .items
+        .iter()
+        .find_map(|it| match it {
+            Placed::Lines { story: StoryRef::Body, path, para, l0, l1, y, .. } if path.0 == [block] && (*l0..*l1).contains(&k) => {
+                Some(y + para.lines.get(k)?.top - para.lines.get(*l0)?.top)
+            }
+            _ => None,
+        })
+        .unwrap()
+}
+
+#[test]
+fn text_after_a_floating_table_keeps_its_space_after_clear_of_the_next_one() {
+    // Word: a table across the top (40–140), then a paragraph (140–157) with 4 or 6 pt after, then
+    // a table at 162: 4 pt fits above it, 6 pt doesn't.
+    for (after, stays) in [(4.0, true), (6.0, false)] {
+        let mut d = spaced_doc(vec![spaced("After the first", after), spaced("Last", 0.0)], 1, float_table(612.0, 60.0, on_page(162.0)));
+        d.insert_block(StoryRef::Body, &Path::top(0), Block::Table(float_table(612.0, 100.0, on_page(40.0)))).unwrap();
+        let l = lay_12(&d);
+        let (t, second) = (top(&l, 0, 1), table_rect(&l, 0, 2).unwrap());
+        if stays {
+            assert!((t - 140.0).abs() < 0.01, "after {after}: at {t}");
+        } else {
+            assert!(t >= second.bottom() - 0.01, "after {after}: at {t}, second table ends {}", second.bottom());
+        }
+    }
+}
+
+#[test]
+fn contextual_and_automatic_space_after_near_a_floating_table() {
+    // Word: contextual spacing drops the space after before a paragraph of the same style, so the
+    // line stays above a table at 92; automatic spacing after is 14 pt (89 + 14 = 103).
+    let mut ctx = spaced("Before", 8.0);
+    ctx.props.contextual_spacing = Some(true);
+    let l = lay_12(&spaced_doc(vec![ctx, spaced("After", 0.0)], 1, float_table(612.0, 100.0, on_page(92.0))));
+    assert!((top(&l, 0, 0) - 72.0).abs() < 0.01, "{}", top(&l, 0, 0));
+    for (y, stays) in [(103.5, true), (102.5, false)] {
+        let mut auto = spaced("Before", 0.0);
+        auto.props.space_after_auto = Some(true);
+        let l = lay_12(&spaced_doc(vec![auto, spaced("After", 0.0)], 1, float_table(612.0, 100.0, on_page(y))));
+        assert_eq!((top(&l, 0, 0) - 72.0).abs() < 0.01, stays, "table at {y}: {}", top(&l, 0, 0));
+    }
+}
+
+#[test]
+fn the_next_paragraphs_space_before_does_not_count_near_a_floating_table() {
+    // Word: 4 pt after and 8 pt before the next paragraph are 8 pt apart, but only the 4 pt keep
+    // clear of a table at 93.5.
+    let mut next = spaced("After", 0.0);
+    next.props.space_before = Some(8.0);
+    let l = lay_12(&spaced_doc(vec![spaced("Before", 4.0), next], 1, float_table(612.0, 100.0, on_page(93.5))));
+    assert!((top(&l, 0, 0) - 72.0).abs() < 0.01, "{}", top(&l, 0, 0));
+}
+
+#[test]
+fn a_last_lines_space_after_keeps_clear_of_a_floating_shape_and_goes_beside_a_narrow_table() {
+    // Word: a shape placed on the page at 95 (top and bottom wrap) takes the line (72–89) with 8 pt
+    // after below it, and leaves it with 4 pt; a table half the text wide at the margin, at 92,
+    // takes it beside itself.
+    for (after, stays) in [(8.0, false), (4.0, true)] {
+        let float = Float { wrap: Wrap::TopAndBottom, h_rel: Anchor::Page, v_rel: Anchor::Page, y: 95.0, ..Default::default() };
+        let mut d = Document::from_text("");
+        d.body = [spaced("Before", after), spaced("Anchor", 0.0), spaced("After", 0.0)].into_iter().map(wordcraft_doc::para_block).collect();
+        d.insert_object(&Pos::body(1, 0), rect_shape(612.0, 100.0, float), &Default::default()).unwrap();
+        let l = lay_12(&d);
+        let shape = shapes(&l.pages[0].items)[0];
+        let t = top(&l, 0, 0);
+        assert_eq!((t - 72.0).abs() < 0.01, stays, "after {after}: at {t}, shape {shape:?}");
+        if !stays {
+            assert!(t >= shape.bottom() - 0.01, "after {after}: at {t}, shape {shape:?}");
+        }
+    }
+    let left = TableFloat { h_rel: Anchor::Margin, dist: [7.1, 0.0, 7.1, 0.0], ..on_page(92.0) };
+    let l = lay_12(&spaced_doc(vec![spaced("Before", 8.0), spaced("After", 0.0)], 1, float_table(234.0, 100.0, left)));
+    let table = table_rect(&l, 0, 1).unwrap();
+    let (t, _, x) = lines(&l, 0, 0).unwrap();
+    assert!((t - 72.0).abs() < 0.01 && x >= table.right() + 7.1 - 0.01, "at ({x}, {t}), {table:?}");
+}
+
+#[test]
+fn text_of_an_earlier_section_keeps_its_space_after_clear_of_a_later_shape_too() {
+    // Word (mode 12, A4, top margin 28.35 pt, Aptos 12 with 8 pt after): `XXX`, `ZZZ`, a
+    // continuous section break, `YYY`, then a paragraph anchoring a shape across the page at
+    // 45–145 pt: XXX, whose line ends above the shape and whose space after reaches it, goes below
+    // the shape (147.7) with ZZZ (172.7). Here the earlier section is one paragraph (72–89) with 8
+    // pt after, the shape at 95–195: below it in mode 12, where it stays with 4 pt after or in
+    // Word 2013 layout.
+    use wordcraft_doc::section::SectionStart;
+    for (after, mode, stays) in [(8.0, wordcraft_doc::LEGACY_COMPAT_MODE, false), (4.0, wordcraft_doc::LEGACY_COMPAT_MODE, true), (8.0, 15, true)] {
+        let float = Float { wrap: Wrap::TopAndBottom, h_rel: Anchor::Page, v_rel: Anchor::Page, y: 95.0, ..Default::default() };
+        let mut d = Document::from_text("");
+        let mut earlier = spaced("Earlier", after);
+        earlier.section = Some(Box::default());
+        d.body = [earlier, spaced("Before", 0.0), spaced("Anchor", 0.0), spaced("After", 0.0)].into_iter().map(wordcraft_doc::para_block).collect();
+        d.last_section.start = SectionStart::Continuous;
+        d.insert_object(&Pos::body(2, 0), rect_shape(612.0, 100.0, float), &Default::default()).unwrap();
+        let l = in_mode(d, mode);
+        let shape = shapes(&l.pages[0].items)[0];
+        let t = top(&l, 0, 0);
+        assert_eq!((t - 72.0).abs() < 0.01, stays, "{after} pt after, mode {mode}: at {t}, shape {shape:?}");
+        if !stays {
+            assert!((t - shape.bottom()).abs() < 0.01, "{after} pt after, mode {mode}: at {t}, shape {shape:?}");
+        }
+        assert!(clear_of(&l, 0, &shape) && top(&l, 0, 1) >= shape.bottom() - 0.01, "{after} pt after, mode {mode}: {}", top(&l, 0, 1));
+    }
+}
+
+#[test]
+fn automatic_line_spacing_keeps_the_whole_line_and_its_space_after_clear() {
+    // The same with automatic (single) line spacing: the line's own height plus 8 pt.
+    use wordcraft_doc::props::LineSpacing;
+    let single = |text: &str, after: f32| {
+        let mut p = spaced(text, after);
+        p.props.line_spacing = Some(LineSpacing::Multiple(1.0));
+        p
+    };
+    let mut plain = Document::from_text("");
+    plain.body = vec![wordcraft_doc::para_block(single("Before", 0.0))];
+    let bottom = lines(&lay_12(&plain), 0, 0).unwrap().1;
+    for (y, stays) in [(bottom + 8.5, true), (bottom + 7.5, false), (bottom + 0.5, false)] {
+        let l = lay_12(&spaced_doc(vec![single("Before", 8.0), single("After", 0.0)], 1, float_table(612.0, 100.0, on_page(y))));
+        assert_eq!((top(&l, 0, 0) - 72.0).abs() < 0.01, stays, "line ends {bottom}, table at {y}: {}", top(&l, 0, 0));
+    }
+}
+
+#[test]
+fn automatic_space_after_counts_before_a_paragraph_that_shows_no_list_label() {
+    // Automatic spacing after a list item drops between two list items only when the next one
+    // shows a label: before a paragraph whose list is missing, or whose level shows no number,
+    // the 14 pt stay and keep the line (72–89) clear of a table at 100.
+    use wordcraft_doc::props::NumRef;
+    for (next, stays) in [("same list", true), ("missing list", false), ("no number", false)] {
+        let mut d = spaced_doc(vec![spaced("Item", 0.0), spaced("Next", 0.0)], 0, float_table(612.0, 100.0, on_page(100.0)));
+        let num = d.numbering.add_list(wordcraft_doc::ListKind::Numbered);
+        let other = d.numbering.add_list(wordcraft_doc::ListKind::Numbered);
+        if next == "no number" {
+            let abs = d.numbering.abstract_of(other).map(|a| a.id);
+            for a in d.numbering.abstracts.iter_mut().filter(|a| Some(a.id) == abs) {
+                for level in &mut a.levels {
+                    level.format = wordcraft_doc::section::NumFormat::None;
+                }
+            }
+        }
+        let next_num = match next {
+            "same list" => num,
+            "missing list" => 9999,
+            _ => other,
+        };
+        if let Some(Block::Para(p)) = d.body.get_mut(1).map(Arc::make_mut) {
+            p.props.numbering = Some(NumRef { num, level: 0 });
+            p.props.space_after_auto = Some(true);
+        }
+        if let Some(Block::Para(p)) = d.body.get_mut(2).map(Arc::make_mut) {
+            p.props.numbering = Some(NumRef { num: next_num, level: 0 });
+        }
+        let l = lay_12(&d);
+        let t = top(&l, 0, 1);
+        assert_eq!((t - 72.0).abs() < 0.01, stays, "{next}: item at {t}");
+        if !stays {
+            assert!(t >= 200.0 - 0.01, "{next}: item at {t}");
+        }
+    }
+}
+
+/// A paragraph of two inline drawings 150 pt wide with a space between, exact 17 pt lines and
+/// `after` after: font-independent widths that fill one strip each beside a shape in the middle.
+fn two_drawings(after: f32) -> Document {
+    let mut d = Document::from_text("");
+    d.body = vec![wordcraft_doc::para_block(spaced(" ", after))];
+    d.insert_object(&Pos::body(0, 1), rect_shape(150.0, 10.0, Float::default()), &Default::default()).unwrap();
+    d.insert_object(&Pos::body(0, 0), rect_shape(150.0, 10.0, Float::default()), &Default::default()).unwrap();
+    d
+}
+
+#[test]
+fn a_last_line_beside_a_shape_keeps_its_space_after_clear_and_its_row_moves_with_it() {
+    // Word: a row split by a square-wrapped shape in the middle (250–350 across), its second
+    // strip the paragraph's last line, and a shape across the page from 92: with 8 pt after the
+    // whole row (72–89, + 8) goes below the second shape; with none it stays, a drawing in each strip.
+    for (after, moves) in [(8.0, true), (0.0, false)] {
+        let mut d = two_drawings(after);
+        let square = Float { wrap: Wrap::Square, h_rel: Anchor::Page, v_rel: Anchor::Page, x: 250.0, y: 40.0, ..Default::default() };
+        let full = Float { wrap: Wrap::TopAndBottom, h_rel: Anchor::Page, v_rel: Anchor::Page, y: 92.0, ..Default::default() };
+        d.insert_object(&Pos::body(0, 0), rect_shape(100.0, 100.0, square), &Default::default()).unwrap();
+        d.insert_object(&Pos::body(0, 0), rect_shape(612.0, 100.0, full), &Default::default()).unwrap();
+        let l = lay_12(&d);
+        let rows: Vec<(f32, f32)> = l.pages[0]
+            .items
+            .iter()
+            .filter_map(|it| match it {
+                Placed::Lines { story: StoryRef::Body, para, l0, l1, x, y, .. } => {
+                    Some(para.lines.get(*l0..*l1).unwrap_or(&[]).iter().map(|ln| (x + ln.left, y + ln.top - para.lines[*l0].top)).collect::<Vec<_>>())
+                }
+                _ => None,
+            })
+            .flatten()
+            .collect();
+        if moves {
+            assert!(rows.iter().all(|(_, t)| *t >= 192.0 - 0.01), "after {after}: {rows:?}");
+        } else {
+            assert!(rows.len() == 2 && rows.iter().all(|(_, t)| (*t - 72.0).abs() < 0.01), "after {after}: {rows:?}");
+            assert!(rows.iter().any(|(x, _)| *x >= 350.0 - 0.01), "after {after}: one strip right of the shape: {rows:?}");
+        }
+    }
+}
+
+#[test]
+fn a_paragraph_ending_in_a_line_break_keeps_its_space_after_clear() {
+    // Word: a paragraph ending in a line break has an empty last line (89–106 here); with 8 pt
+    // after that line goes below a table at 110, with none it stays.
+    for (after, moves) in [(8.0, true), (0.0, false)] {
+        let l = lay_12(&spaced_doc(vec![spaced("Before\n", after), spaced("After", 0.0)], 1, float_table(612.0, 100.0, on_page(110.0))));
+        let (first, last) = (lines_at(&l, 0, 0, 0), lines_at(&l, 0, 0, 1));
+        assert!((first - 72.0).abs() < 0.01, "after {after}: {first}");
+        if moves {
+            assert!(last >= 210.0 - 0.01, "after {after}: empty last line at {last}");
+        } else {
+            assert!((last - 89.0).abs() < 0.01, "after {after}: empty last line at {last}");
+        }
+    }
+}
+
+#[test]
+fn the_empty_line_after_a_final_line_break_goes_beside_a_narrow_float_in_its_strip() {
+    // Word: `Before` and a line break beside a table or shape at the left margin, then `After`:
+    // the empty line takes the next row beside the float (`After` one row lower, 8 pt lower
+    // still with 8 pt after), in the strip right of it like the other lines (where in the row
+    // an empty line sits doesn't show in Word's PDF).
+    let left_edge = |l: &DocLayout, block: u32, k: usize| {
+        l.pages[0].items.iter().find_map(|it| match it {
+            Placed::Lines { story: StoryRef::Body, path, para, l0, l1, x, .. } if path.0 == [block] && (*l0..*l1).contains(&k) => {
+                Some(x + para.lines.get(k)?.left)
+            }
+            _ => None,
+        })
+    };
+    for after in [0.0, 8.0] {
+        let table = TableFloat { h_rel: Anchor::Margin, dist: [7.1, 0.0, 7.1, 0.0], ..on_page(40.0) };
+        let l = lay_12(&spaced_doc(vec![spaced("Before\n", after), spaced("After", 0.0)], 0, float_table(234.0, 100.0, table)));
+        let strip = table_rect(&l, 0, 0).unwrap().right() + 7.1;
+        assert!((lines_at(&l, 0, 1, 1) - 89.0).abs() < 0.01, "after {after}: {}", lines_at(&l, 0, 1, 1));
+        assert!(left_edge(&l, 1, 1).is_some_and(|x| x >= strip - 0.01), "after {after}: {:?}, strip from {strip}", left_edge(&l, 1, 1));
+        assert!((top(&l, 0, 2) - (106.0 + after)).abs() < 0.01, "after {after}: {}", top(&l, 0, 2));
+
+        let square = Float { wrap: Wrap::Square, h_rel: Anchor::Margin, v_rel: Anchor::Page, y: 40.0, ..Default::default() };
+        let mut d = Document::from_text("");
+        d.body = [spaced("Before\n", after), spaced("After", 0.0)].into_iter().map(wordcraft_doc::para_block).collect();
+        d.insert_object(&Pos::body(0, 0), rect_shape(200.0, 100.0, square), &Default::default()).unwrap();
+        let l = lay_12(&d);
+        let shape = shapes(&l.pages[0].items)[0];
+        assert!((lines_at(&l, 0, 0, 1) - 89.0).abs() < 0.01, "shape, after {after}: {}", lines_at(&l, 0, 0, 1));
+        assert!(left_edge(&l, 0, 1).is_some_and(|x| x >= shape.right() - 0.01), "shape, after {after}: {:?}, {shape:?}", left_edge(&l, 0, 1));
+        assert!((top(&l, 0, 1) - (106.0 + after)).abs() < 0.01, "shape, after {after}: {}", top(&l, 0, 1));
+    }
+}
+
+#[test]
+fn in_word_2013_layout_only_the_line_keeps_clear_of_a_float_not_its_space_after() {
+    // Word for Mac, compatibility mode 15 against 12 (and 14): a line (72–89) with 8 pt after
+    // stays above a table or shape at 96.5 in mode 15 and goes below it before; a shape 3.6 pt
+    // from text at 93 (its wrap area from 89.4) the same; at 92 (from 88.4) the line itself
+    // reaches it and goes below in both, 3.6 pt below the shape (195.6).
+    let table = |mode: u32, y: f32| {
+        let mut d = spaced_doc(vec![spaced("Before", 8.0), spaced("After", 0.0)], 1, float_table(612.0, 100.0, on_page(y)));
+        d.settings.compat_mode = mode;
+        top(&lay(&d), 0, 0)
+    };
+    let shape = |mode: u32, y: f32, dist: f32| {
+        let float =
+            Float { wrap: Wrap::TopAndBottom, h_rel: Anchor::Page, v_rel: Anchor::Page, y, dist_top: dist, dist_bottom: dist, ..Default::default() };
+        let mut d = Document::from_text("");
+        d.body = [spaced("Before", 8.0), spaced("Anchor", 0.0)].into_iter().map(wordcraft_doc::para_block).collect();
+        d.insert_object(&Pos::body(1, 0), rect_shape(612.0, 100.0, float), &Default::default()).unwrap();
+        d.settings.compat_mode = mode;
+        top(&lay(&d), 0, 0)
+    };
+    for mode in [12, 14, 15] {
+        let stays = mode >= 15;
+        let t = table(mode, 96.5);
+        assert_eq!((t - 72.0).abs() < 0.01, stays, "mode {mode}, table at 96.5: {t}");
+        let t = shape(mode, 96.5, 0.0);
+        assert_eq!((t - 72.0).abs() < 0.01, stays, "mode {mode}, shape at 96.5: {t}");
+        let t = shape(mode, 93.0, 3.6);
+        assert_eq!((t - 72.0).abs() < 0.01, stays, "mode {mode}, shape at 93 with 3.6 from text: {t}");
+        let t = shape(mode, 92.0, 3.6);
+        assert!((t - 195.6).abs() < 0.01, "mode {mode}, shape at 92 with 3.6 from text: {t}");
+    }
+}
+
+#[test]
+fn an_empty_paragraph_below_a_box_its_paragraph_before_anchors_keeps_only_its_own_space_after() {
+    // Word for Mac, an agenda letter: a paragraph of two lines (a line break; 72–106) with 30 pt
+    // after anchors a box 87.5 pt high, 3.6 pt from text, placed 65.75 pt below the paragraph's
+    // top (137.75, its wrap area 134.15–228.85); then an empty paragraph with 30 pt after, then
+    // the text. Word 2013 layout: the two lines stay (only the space after reaches the box), the
+    // empty paragraph goes below the box (228.85) and the text follows it and its 30 pt (275.85).
+    // Before (mode 12 and 14): the last line goes below the box too, so the text is at 322.85.
+    for (mode, empty, text) in [(15, 228.85, 275.85), (12, 275.85, 322.85), (14, 275.85, 322.85)] {
+        let float = Float {
+            wrap: Wrap::TopAndBottom,
+            h_rel: Anchor::Page,
+            v_rel: Anchor::Paragraph,
+            y: 65.75,
+            dist_top: 3.6,
+            dist_bottom: 3.6,
+            ..Default::default()
+        };
+        let mut d = Document::from_text("");
+        d.body = [spaced("Address\n", 30.0), spaced("", 30.0), spaced("Item", 0.0)].into_iter().map(wordcraft_doc::para_block).collect();
+        d.insert_object(&Pos::body(0, 0), rect_shape(468.0, 87.5, float), &Default::default()).unwrap();
+        d.settings.compat_mode = mode;
+        let l = lay(&d);
+        let shape = shapes(&l.pages[0].items)[0];
+        assert!((shape.y - 137.75).abs() < 0.01, "mode {mode}: {shape:?}");
+        assert!((lines_at(&l, 0, 0, 0) - 72.0).abs() < 0.01, "mode {mode}: {}", lines_at(&l, 0, 0, 0));
+        let (e, t) = (top(&l, 0, 1), top(&l, 0, 2));
+        assert!((e - empty).abs() < 0.01 && (t - text).abs() < 0.01, "mode {mode}: empty paragraph at {e}, text at {t}, not {empty} / {text}");
+    }
+}
+
+fn multiple(text: &str, m: f32) -> Paragraph {
+    use wordcraft_doc::props::LineSpacing;
+    let mut p = spaced(text, 0.0);
+    p.props.line_spacing = Some(LineSpacing::Multiple(m));
+    p
+}
+
+fn in_mode(mut d: Document, mode: u32) -> DocLayout {
+    d.settings.compat_mode = mode;
+    lay(&d)
+}
+
+#[test]
+fn in_word_2013_layout_a_line_keeps_its_text_clear_of_a_float_not_its_extra_line_spacing() {
+    let mut single = Document::from_text("");
+    single.body = vec![wordcraft_doc::para_block(multiple("Before", 1.0))];
+    let natural = lines(&lay(&single), 0, 0).unwrap().1 - 72.0;
+    for m in [1.15, 2.0] {
+        let at = |y: f32, mode: u32| {
+            top(&in_mode(spaced_doc(vec![multiple("Before", m), multiple("After", m)], 1, float_table(612.0, 100.0, on_page(y))), mode), 0, 0)
+        };
+        for (y, mode, stays) in [
+            (72.0 + natural + 0.3, 15, true),
+            (72.0 + natural - 0.9, 15, false),
+            (72.0 + natural + 0.3, 12, false),
+            (72.0 + natural + 0.3, 14, false),
+            (72.0 + natural * m + 0.4, 12, true),
+        ] {
+            let t = at(y, mode);
+            assert_eq!((t - 72.0).abs() < 0.01, stays, "{m} lines, mode {mode}, natural {natural}, table at {y}: {t}");
+        }
+        let last = 72.0 + natural * m + natural;
+        for (y, mode, stays) in [(last + 1.1, 15, true), (last - 0.9, 15, false), (last + 1.1, 12, false)] {
+            let l = in_mode(spaced_doc(vec![multiple("Before\n", m), multiple("After", m)], 1, float_table(612.0, 100.0, on_page(y))), mode);
+            let t = lines_at(&l, 0, 0, 1);
+            assert_eq!((t - (72.0 + natural * m)).abs() < 0.01, stays, "{m} lines, mode {mode}, empty line, table at {y}: {t}");
+        }
+    }
+}
+
+#[test]
+fn a_line_of_pictures_keeps_only_them_clear_of_a_float_in_word_2013_layout_and_their_paragraph_mark_before() {
+    let picture = |text: &str, w: f32, m: f32| {
+        let mut d = Document::from_text("");
+        d.body = vec![wordcraft_doc::para_block(multiple(text, m)), wordcraft_doc::para_block(multiple("After", m))];
+        d.insert_object(&Pos::body(0, 0), rect_shape(w, 33.2, Float::default()), &Default::default()).unwrap();
+        d
+    };
+    let with_table = |text: &str, w: f32, y: f32, at: usize| {
+        let mut d = picture(text, w, 1.15);
+        d.insert_block(StoryRef::Body, &Path::top(at), Block::Table(float_table(612.0, 100.0, on_page(y)))).unwrap();
+        d
+    };
+    for at in [0, 1] {
+        let para = if at == 0 { 1 } else { 0 };
+        for (text, w, y, mode, stays) in [
+            (" ", 400.0, 105.4, 15, true),
+            (" ", 400.0, 104.8, 15, false),
+            ("", 500.0, 105.6, 15, true),
+            (" ", 500.0, 105.4, 15, true),
+            (" ", 400.0, 105.7, 12, false),
+            (" ", 400.0, 105.7, 14, false),
+            ("", 500.0, 105.7, 12, false),
+            ("", 500.0, 105.7, 14, false),
+            (" ", 500.0, 105.4, 12, true),
+            (" ", 500.0, 105.4, 14, true),
+        ] {
+            let t = top(&in_mode(with_table(text, w, y, at), mode), 0, para);
+            assert_eq!((t - 72.0).abs() < 0.01, stays, "table {at}, {w} wide picture and {text:?}, mode {mode}, table at {y}: {t}");
+        }
+        let bottom = lines(&lay(&picture("ZZZ", 400.0, 1.0)), 0, 0).unwrap().1;
+        for (y, stays) in [(bottom + 0.9, true), (bottom - 0.6, false)] {
+            let t = top(&in_mode(with_table("ZZZ", 400.0, y, at), 15), 0, para);
+            assert_eq!((t - 72.0).abs() < 0.01, stays, "table {at}, text after the picture to {bottom}, table at {y}: {t}");
+        }
+    }
+}

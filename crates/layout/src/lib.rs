@@ -842,6 +842,7 @@ impl Ctx<'_> {
             typing_word: None,
             numeral: self.opts.numeral,
             exclusions: &[],
+            wrap_after: 0.0,
             eq_number: 0,
             read_line_spacing: None,
             grid: para::Grid::default(),
@@ -879,8 +880,21 @@ impl Ctx<'_> {
         exclusions: &[para::Exclusion],
         label: Option<(String, Level)>,
     ) -> Arc<ParaLayout> {
+        self.para_wrapped(p, width, table, (exclusions, 0.0), label)
+    }
+
+    /// [`Ctx::para_labelled`] around `exclusions`, its last line keeping `wrap_after` below it
+    /// clear of them (see [`para::ParaEnv::wrap_after`]).
+    fn para_wrapped(
+        &mut self,
+        p: &Paragraph,
+        width: f32,
+        table: Option<&para::CellText>,
+        (exclusions, wrap_after): (&[para::Exclusion], f32),
+        label: Option<(String, Level)>,
+    ) -> Arc<ParaLayout> {
         let fitted = self.fitted_boxes(p);
-        let (key, eq_number) = self.para_key(p, width, table, exclusions, label.as_ref(), &fitted);
+        let (key, eq_number) = self.para_key(p, width, table, (exclusions, wrap_after), label.as_ref(), &fitted);
         self.cache.used.insert(key.clone());
         if let Some(pl) = self.cache.paras.get(&key) {
             self.cache.hits += 1;
@@ -888,7 +902,7 @@ impl Ctx<'_> {
         }
         self.cache.misses += 1;
         let typing = key.typing;
-        let pl = Arc::new(para::layout_para(p, &self.para_env(width, label, table, exclusions, eq_number, typing, &fitted)));
+        let pl = Arc::new(para::layout_para(p, &self.para_env(width, label, table, (exclusions, wrap_after), eq_number, typing, &fitted)));
         self.cache.paras.insert(key, pl.clone());
         pl
     }
@@ -905,7 +919,7 @@ impl Ctx<'_> {
         measure: impl FnOnce(&ParaLayout) -> (f32, f32),
     ) -> (f32, f32) {
         let fitted = self.fitted_boxes(p);
-        let (key, eq_number) = self.para_key(p, width, table, &[], label.as_ref(), &fitted);
+        let (key, eq_number) = self.para_key(p, width, table, (&[], 0.0), label.as_ref(), &fitted);
         self.cache.used.insert(key.clone());
         if let Some(m) = self.cache.measures.get(&key) {
             self.cache.hits += 1;
@@ -913,7 +927,7 @@ impl Ctx<'_> {
         }
         self.cache.misses += 1;
         let typing = key.typing;
-        let m = measure(&para::layout_para(p, &self.para_env(width, label, table, &[], eq_number, typing, &fitted)));
+        let m = measure(&para::layout_para(p, &self.para_env(width, label, table, (&[], 0.0), eq_number, typing, &fitted)));
         self.cache.measures.insert(key, m);
         m
     }
@@ -950,7 +964,7 @@ impl Ctx<'_> {
         p: &Paragraph,
         width: f32,
         table: Option<&para::CellText>,
-        exclusions: &[para::Exclusion],
+        (exclusions, wrap_after): (&[para::Exclusion], f32),
         label: Option<&(String, Level)>,
         fitted: &[(usize, f32)],
     ) -> (Key, u32) {
@@ -977,7 +991,7 @@ impl Ctx<'_> {
             page,
             table: table.map(|t| self.table_key(t)).unwrap_or(0),
             notes: if p.objects.iter().any(|o| matches!(o, InlineObject::NoteRef { .. })) { self.notes_hash } else { 0 },
-            excl: if exclusions.is_empty() { 0 } else { hash_of(&format!("{exclusions:?}")) },
+            excl: if exclusions.is_empty() { 0 } else { hash_of(&format!("{exclusions:?}{}", wrap_after.to_bits())) },
             eq: if eq_here > 0 { eq_number } else { 0 },
             read_spacing: if self.opts.view == ViewMode::Read { self.opts.read_line_spacing.map(f32::to_bits) } else { None },
             grid: self.grid.key(),
@@ -1010,7 +1024,7 @@ impl Ctx<'_> {
         width: f32,
         label: Option<(String, Level)>,
         table: Option<&'b para::CellText>,
-        exclusions: &'b [para::Exclusion],
+        (exclusions, wrap_after): (&'b [para::Exclusion], f32),
         eq_number: u32,
         typing_word: Option<(usize, usize)>,
         fitted: &'b [(usize, f32)],
@@ -1028,6 +1042,7 @@ impl Ctx<'_> {
             typing_word,
             numeral: self.opts.numeral,
             exclusions,
+            wrap_after: if exclusions.is_empty() { 0.0 } else { wrap_after },
             eq_number,
             read_line_spacing: if self.opts.view == ViewMode::Read { self.opts.read_line_spacing } else { None },
             grid: self.grid,
@@ -3398,7 +3413,7 @@ fn anchor_floats(
     y0: f32,
     before: f32,
     excl_mark: (usize, usize),
-    label: &Option<(String, Level)>,
+    (label, wrap_after): (&Option<(String, Level)>, f32),
     place: bool,
 ) -> (HashMap<usize, Rect>, Arc<ParaLayout>, Vec<para::Exclusion>) {
     ctx.fields.page = pb.number;
@@ -3428,7 +3443,7 @@ fn anchor_floats(
                 // text the walk doesn't lay out again is still under it (#2048 moves that).
                 let outline = ctx.wrap_outline(o);
                 let area = wrap_area(r, float, outline.as_deref().map(|v| v.as_slice()));
-                let under = area.filter(|a| pb.pages.get(page).is_some_and(|pg| float_before::text_under(ctx.doc, pg, pb.walk_from.min(block), a)));
+                let under = area.filter(|a| pb.pages.get(page).is_some_and(|pg| float_before::text_under(ctx, pg, pb.walk_from.min(block), a)));
                 ctx.floats_above.insert((block, oi), under.map(|a| (page, a)));
                 continue;
             }
@@ -3459,7 +3474,7 @@ fn anchor_floats(
         }
     }
     let rel = rel_exclusions(&body_wraps(ctx, pb), col_x, y0);
-    let pl = ctx.para_labelled(p, width, None, &rel, label.clone());
+    let pl = ctx.para_wrapped(p, width, None, (&rel, wrap_after), label.clone());
     (rects, pl, rel)
 }
 
@@ -3783,17 +3798,19 @@ fn place_para_in_flow(ctx: &mut Ctx, pb: &mut PageBuilder, p: &Paragraph, block:
     // Floating objects anchored here join the page's wrap areas before the text is laid out; if
     // the paragraph then starts somewhere else (another column or page, or contextual spacing
     // drops its space before), they are placed again there.
-    let space_before = ctx.doc.styles.resolve_para(&p.props).space_before;
+    let rp = ctx.doc.styles.resolve_para(&p.props);
+    let space_before = rp.space_before;
     let excl_mark = (pb.pages.len(), pb.excl.len());
     let guess = pb.y + space_before;
     let label = ctx.next_label(p);
+    let wrap_after = space_after_clear_of_floats(ctx, block, &rp, label.is_some());
     // The pages this paragraph's fields are on after its first (`FieldCtx::page_from`), kept here
     // and lent to the field context only while this paragraph itself is laid out, so footnotes,
     // text boxes and headers laid out in between never see it (#1352).
     let mut page_map: Vec<(usize, u32)> = Vec::new();
     // Where its automatic equation numbers start: each layout of it again counts from here.
     let eq_start = ctx.eq_count;
-    let (mut float_rects, mut pl, mut rel) = anchor_floats(ctx, pb, p, block, guess, space_before, excl_mark, &label, true);
+    let (mut float_rects, mut pl, mut rel) = anchor_floats(ctx, pb, p, block, guess, space_before, excl_mark, (&label, wrap_after), true);
     // The page the floating objects were placed on (by index).
     let mut float_page = pb.pages.len().saturating_sub(1);
     // The page its fields were laid out for (and the width), and how many times it was laid out again for a later
@@ -3887,7 +3904,8 @@ fn place_para_in_flow(ctx: &mut Ctx, pb: &mut PageBuilder, p: &Paragraph, block:
     // A different top only matters when there is something to wrap around.
     if spot(pb) != placed_at || ((pb.y - guess).abs() > 0.01 && !pb.excl.is_empty()) {
         let y0 = pb.y;
-        (float_rects, pl, rel) = again(ctx, eq_start, |ctx| anchor_floats(ctx, pb, p, block, y0, applied_before, excl_mark, &label, true));
+        (float_rects, pl, rel) =
+            again(ctx, eq_start, |ctx| anchor_floats(ctx, pb, p, block, y0, applied_before, excl_mark, (&label, wrap_after), true));
         float_page = pb.pages.len().saturating_sub(1);
         (laid_page, laid_width) = (pb.number, pb.col_w());
         anchor_y = y0 - applied_before;
@@ -3911,8 +3929,9 @@ fn place_para_in_flow(ctx: &mut Ctx, pb: &mut PageBuilder, p: &Paragraph, block:
                 ctx.fields.page = laid_page;
                 #[cfg(test)]
                 WRAP_RELAYS.with(|c| c.set(c.get() + 1));
-                let relaid =
-                    with_page_map(ctx, &mut page_map, |ctx| again(ctx, eq_start, |ctx| ctx.para_labelled(p, laid_width, None, &here, label.clone())));
+                let relaid = with_page_map(ctx, &mut page_map, |ctx| {
+                    again(ctx, eq_start, |ctx| ctx.para_wrapped(p, laid_width, None, (&here, wrap_after), label.clone()))
+                });
                 // Only if the rest still starts at the same line, at the same height (an outline
                 // reaching above it could move the lines before down, and the column's areas with them).
                 if let Some(k) = relaid.lines.iter().position(|l| l.start == resume)
@@ -3939,8 +3958,9 @@ fn place_para_in_flow(ctx: &mut Ctx, pb: &mut PageBuilder, p: &Paragraph, block:
             page_relays += 1;
             page_map.push((resume, pb.number));
             ctx.fields.page = laid_page;
-            let relaid =
-                with_page_map(ctx, &mut page_map, |ctx| again(ctx, eq_start, |ctx| ctx.para_labelled(p, laid_width, None, &rel, label.clone())));
+            let relaid = with_page_map(ctx, &mut page_map, |ctx| {
+                again(ctx, eq_start, |ctx| ctx.para_wrapped(p, laid_width, None, (&rel, wrap_after), label.clone()))
+            });
             match relaid.lines.iter().position(|l| l.start == resume) {
                 Some(k) => {
                     pl = relaid;
@@ -4063,7 +4083,8 @@ fn place_para_in_flow(ctx: &mut Ctx, pb: &mut PageBuilder, p: &Paragraph, block:
                 pb.advance(block, body_top);
                 if l0 == 0 {
                     let y0 = pb.y;
-                    (float_rects, pl, rel) = again(ctx, eq_start, |ctx| anchor_floats(ctx, pb, p, block, y0, 0.0, excl_mark, &label, true));
+                    (float_rects, pl, rel) =
+                        again(ctx, eq_start, |ctx| anchor_floats(ctx, pb, p, block, y0, 0.0, excl_mark, (&label, wrap_after), true));
                     float_page = pb.pages.len().saturating_sub(1);
                     (laid_page, laid_width) = (pb.number, pb.col_w());
                     anchor_y = y0;
@@ -4188,7 +4209,7 @@ fn place_para_in_flow(ctx: &mut Ctx, pb: &mut PageBuilder, p: &Paragraph, block:
                     let y0 = pb.y;
                     // The floats were placed and drawn with the first piece: they stay there.
                     let (rects, relaid, relaid_rel) = with_page_map(ctx, &mut page_map, |ctx| {
-                        again(ctx, eq_start, |ctx| anchor_floats(ctx, pb, p, block, y0, 0.0, excl_mark, &label, false))
+                        again(ctx, eq_start, |ctx| anchor_floats(ctx, pb, p, block, y0, 0.0, excl_mark, (&label, wrap_after), false))
                     });
                     if let Some(k) = relaid.lines.iter().position(|l| l.start == resume) {
                         (float_rects, pl, rel) = (rects, relaid, relaid_rel);
@@ -4295,17 +4316,33 @@ fn mirror_shift(rp: &wordcraft_doc::resolve::ResolvedPara, number: u32, web: boo
     right - left
 }
 
+/// How far below body paragraph `block`'s last line floating tables and objects are kept clear
+/// (they move the line below or beside them otherwise): its space after ([`space_after_kept`])
+/// before Word 2013 layout, nothing from it on, where only the line itself keeps clear. Measured
+/// in Word for Mac with tables and shapes in compatibility modes 12, 14 and 15.
+fn space_after_clear_of_floats(ctx: &Ctx, block: usize, rp: &wordcraft_doc::resolve::ResolvedPara, listed: bool) -> f32 {
+    if ctx.doc.settings.compat_mode >= wordcraft_doc::COMPAT_MODE_CURRENT { 0.0 } else { space_after_kept(ctx, block, rp, listed) }
+}
+
 /// The space after body paragraph `block` (resolved as `rp`) that is really left below it: none
 /// when contextual spacing or automatic spacing between list items drops it before the next
 /// paragraph. Same tests as the spacing between paragraphs in `place_para_in_flow`: contextual
 /// spacing removes this paragraph's space after only when this one asks for it, and the next
-/// counts as a list item when it gets a label.
+/// counts as a list item when it gets a label. Floating tables in between stand outside the text
+/// and are passed over (Word: contextual spacing before a paragraph after one still applies next
+/// to it); a table in the text ends the search. Before Word 2013 layout a paragraph's last line
+/// keeps this much clear of floating objects too (see [`space_after_clear_of_floats`]).
 fn space_after_kept(ctx: &Ctx, block: usize, rp: &wordcraft_doc::resolve::ResolvedPara, listed: bool) -> f32 {
     let after = rp.space_after.max(0.0);
-    if after <= 0.0 {
-        return 0.0;
+    if after <= 0.0 || !(rp.contextual_spacing || (rp.after_auto && listed)) {
+        return after;
     }
-    if let Some(Block::Para(next)) = ctx.doc.body.get(block + 1).map(|b| &**b) {
+    let next = ctx.doc.body.iter().skip(block.saturating_add(1)).find_map(|b| match &**b {
+        Block::Para(p) => Some(Some(p)),
+        Block::Table(t) if t.props.float.is_some() => None,
+        Block::Table(_) => Some(None),
+    });
+    if let Some(Some(next)) = next {
         let nrp = ctx.doc.styles.resolve_para(&next.props);
         if nrp.style == rp.style && rp.contextual_spacing {
             return 0.0;
@@ -4343,6 +4380,7 @@ fn next_first_line(ctx: &mut Ctx, block: usize, width: f32, depth: usize, counte
                 typing_word: None,
                 numeral: ctx.opts.numeral,
                 exclusions: &[],
+                wrap_after: 0.0,
                 eq_number: ctx.eq_count,
                 read_line_spacing: if ctx.opts.view == ViewMode::Read { ctx.opts.read_line_spacing } else { None },
                 grid: ctx.grid,
