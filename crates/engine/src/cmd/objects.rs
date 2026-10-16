@@ -365,8 +365,10 @@ pub fn specs() -> Vec<CommandSpec> {
                     *stroke = c;
                     // A colour chosen here replaces an outline gradient from a file.
                     extra.outline_fill = None;
-                    if let Some(w) = w {
-                        *stroke_width = w;
+                    match w {
+                        Some(w) => *stroke_width = w,
+                        None if c.is_some() && (*stroke_width <= 0.0 || stroke_width.is_nan()) => *stroke_width = DEFAULT_OUTLINE,
+                        None => {}
                     }
                 } else if let Some(style) = super::canvas::style_mut(o) {
                     style.stroke = c;
@@ -376,7 +378,7 @@ pub fn specs() -> Vec<CommandSpec> {
                 }
             })
         })
-        .params(r#"{"color": "RRGGBB" | null, "width"?: pt}  (a selected drawing canvas: its border)"#)
+        .params(r#"{"color": "RRGGBB" | null, "width"?: pt}  (a shape with no outline width gets Word's 0.75 pt; a selected drawing canvas: its border)"#)
         .when(has_shape_or_canvas),
         CommandSpec::new("shape.effects", "Shape Effects", "Shape Format › Shape Styles", shape_effects)
             .params(
@@ -656,6 +658,9 @@ fn shape_effects(s: &mut Session, v: &Value) -> CmdResult {
 pub fn min_size(o: &InlineObject) -> f32 {
     if matches!(o, InlineObject::Shape { story: Some(_), .. }) { 18.0 } else { 4.0 }
 }
+
+/// The outline width Word gives a shape that gets an outline without one, points.
+const DEFAULT_OUTLINE: f32 = 0.75;
 
 /// Largest object offset or move, points.
 const MAX_OFFSET: f32 = 4000.0;

@@ -524,7 +524,7 @@ struct Key {
     read_spacing: Option<u32>,
     grid: (u32, u32, u32, bool),
     fit: bool,
-    /// Heights of the paragraph's inline boxes that resize to fit their text.
+    /// Inline text boxes fitted to their text ([`Ctx::fitted_boxes`]).
     fitted: u64,
     hide_deleted: HideDeleted,
     /// STYLEREF results in headers and footers ([`FieldCtx::styleref_key`]).
@@ -716,6 +716,8 @@ struct Ctx<'a> {
     boxes: wordcraft_doc::BoxBudget,
     /// Linked text boxes (Create Link).
     chains: textbox::Chains,
+    /// Sizes of text boxes that resize to fit their text ([`textbox::fitted_size`]).
+    fits: HashMap<(u32, [u32; 3], u32), (f32, f32)>,
     /// The current section's document grid (body text only: none for headers and footers).
     grid: para::Grid,
     /// Whether tracked deletions are left out in the story being laid out
@@ -742,9 +744,6 @@ struct Ctx<'a> {
     pin: Option<Pin>,
     footer_wraps: HashMap<(usize, u32, bool), Vec<WrapArea>>,
     header_tables: HashMap<(usize, u32, bool), Vec<Rect>>,
-    /// Heights of text boxes that resize to fit their text, by (story, width), worked out once
-    /// per layout ([`textbox::fitted_height`]).
-    fitted: HashMap<(u32, u32), Option<f32>>,
     /// Each body float's latest placement: on which page and with what wrap area, when it is
     /// above its anchor paragraph with text before it ([`EarlyFloats`]).
     floats_above: HashMap<(usize, usize), Option<(usize, WrapArea)>>,
@@ -816,6 +815,43 @@ impl Ctx<'_> {
             cache.outlines.insert(key, outline.clone());
             outline
         })
+    }
+
+    /// A drawing's size as laid out, and its placement: a text box that resizes to fit its text
+    /// takes the size its text gives it ([`textbox::fitted_size`]), anything else its own.
+    fn drawing_frame<'o>(&mut self, o: &'o InlineObject, depth: usize) -> Option<(f32, f32, &'o Float)> {
+        match o {
+            InlineObject::Shape { w, h, float, story: Some(id), stroke_width, .. } => {
+                let (w, h) = textbox::fitted_size(self, *id, (*w, *h), *stroke_width, depth);
+                Some((w, h, float))
+            }
+            _ => o.frame(),
+        }
+    }
+
+    /// A floating drawing's size as laid out ([`Ctx::drawing_frame`]) and its placement.
+    fn floating_frame<'o>(&mut self, o: &'o InlineObject, depth: usize) -> Option<(f32, f32, &'o Float)> {
+        floating(o)?;
+        self.drawing_frame(o, depth)
+    }
+
+    /// The inline text boxes in `p` laid out at another size than their own (fitted to their
+    /// text): object index, width and height.
+    fn fitted_boxes(&mut self, p: &Paragraph) -> Vec<(usize, f32, f32)> {
+        let doc = self.doc;
+        let mut fits = Vec::new();
+        for (k, o) in p.objects.iter().enumerate() {
+            let InlineObject::Shape { w, h, float, story: Some(id), .. } = o else { continue };
+            if float.wrap != Wrap::Inline || !doc.parts.get(id).is_some_and(|p| p.body.auto_fit) {
+                continue;
+            }
+            if let Some((fw, fh, _)) = self.drawing_frame(o, 0)
+                && (fw, fh) != (*w, *h)
+            {
+                fits.push((k, fw, fh));
+            }
+        }
+        fits
     }
 
     /// A laid-out line number (cached).
@@ -934,31 +970,6 @@ impl Ctx<'_> {
         m
     }
 
-    /// The heights of `p`'s inline text boxes that resize to fit their text, by object index
-    /// ([`para::ParaEnv::fitted`]).
-    fn fitted_boxes(&mut self, p: &Paragraph) -> Vec<(usize, f32)> {
-        let mut out = Vec::new();
-        for (k, o) in p.objects.iter().enumerate() {
-            let InlineObject::Shape { story: Some(id), w, float, .. } = o else { continue };
-            if float.wrap != Wrap::Inline || float.rot != 0.0 {
-                continue;
-            }
-            let key = (*id, w.to_bits());
-            let h = match self.fitted.get(&key) {
-                Some(h) => *h,
-                None => {
-                    let h = textbox::fitted_height(self, *id, *w);
-                    self.fitted.insert(key, h);
-                    h
-                }
-            };
-            if let Some(h) = h {
-                out.push((k, h));
-            }
-        }
-        out
-    }
-
     /// The cache key of `p` laid out with these inputs, and its first automatic equation number
     /// (advancing the count past its equations).
     fn para_key(
@@ -968,7 +979,7 @@ impl Ctx<'_> {
         table: Option<&para::CellText>,
         (exclusions, (wrap_before, wrap_after)): (&[para::Exclusion], (f32, f32)),
         label: Option<&(String, Level)>,
-        fitted: &[(usize, f32)],
+        fitted: &[(usize, f32, f32)],
     ) -> (Key, u32) {
         let page = if has_page_fields(p) { Some(self.fields.page_key()) } else { None };
         if self.track_totals && !self.uses_totals && has_total_fields(p) {
@@ -1029,7 +1040,7 @@ impl Ctx<'_> {
         (exclusions, (wrap_before, wrap_after)): (&'b [para::Exclusion], (f32, f32)),
         eq_number: u32,
         typing_word: Option<(usize, usize)>,
-        fitted: &'b [(usize, f32)],
+        fitted: &'b [(usize, f32, f32)],
     ) -> para::ParaEnv<'b> {
         para::ParaEnv {
             doc: self.doc,
@@ -1305,7 +1316,7 @@ fn layout_box(
                 let mut pinned = HashMap::new();
                 let left_out = left_out_objects(ctx.doc, p, table.map(|t| &t.chr), ctx.opts.show_hidden, ctx.hide_deleted);
                 for (oi, o) in p.objects.iter().enumerate() {
-                    let Some((w, h, float)) = floating(o) else { continue };
+                    let Some((w, h, float)) = ctx.floating_frame(o, depth) else { continue };
                     if left_out(oi) {
                         continue;
                     }
@@ -2374,6 +2385,7 @@ fn layout_pass(
         eq_count: 0,
         boxes: wordcraft_doc::BoxBudget::default(),
         chains: Default::default(),
+        fits: HashMap::new(),
         grid: para::Grid::default(),
         uses_totals: false,
         track_totals: true,
@@ -2381,7 +2393,6 @@ fn layout_pass(
         quiet_marks: Vec::new(),
         mirror: false,
         table_keys: Vec::new(),
-        fitted: HashMap::new(),
         header_tables: HashMap::new(),
         footer_wraps: HashMap::new(),
         pin: None,
@@ -3440,7 +3451,7 @@ fn anchor_floats(
         // it takes no room either.
         let left_out = left_out_objects(ctx.doc, p, None, ctx.opts.show_hidden, ctx.hide_deleted);
         for (oi, o) in p.objects.iter().enumerate() {
-            let Some((w, h, float)) = floating(o) else { continue };
+            let Some((w, h, float)) = ctx.floating_frame(o, 0) else { continue };
             if left_out(oi) {
                 continue;
             }
@@ -3614,7 +3625,7 @@ fn place_objects(
                 continue;
             }
             let Some(obj) = p.objects.get(oi) else { continue };
-            let Some((w, h, float)) = obj.frame() else { continue };
+            let Some((_, _, float)) = obj.frame() else { continue };
             let floating = float.wrap != Wrap::Inline;
             if if floating { !first } else { !in_piece } {
                 continue;
@@ -3623,10 +3634,16 @@ fn place_objects(
             let rect = if let Some(r) = pinned {
                 r
             } else if floating {
-                floats.get(&oi).copied().unwrap_or_else(|| float_rect(at.page, at.col, at.para_y, w, h, float))
+                match floats.get(&oi) {
+                    Some(r) => *r,
+                    None => {
+                        let (w, h, _) = ctx.drawing_frame(obj, depth).unwrap_or((0.0, 0.0, float));
+                        float_rect(at.page, at.col, at.para_y, w, h, float)
+                    }
+                }
             } else {
                 let cx = x + line.cl_left(k).unwrap_or(0.0);
-                display::inline_rect(Some(obj), cx, y + (line.baseline - fl.top), c.adv, c.obj_h)
+                display::inline_rect(pl.object_frame(oi, obj), cx, y + (line.baseline - fl.top), c.adv, c.obj_h)
             };
             let (mut behind, mut front) = (Vec::new(), Vec::new());
             let layer = if float.wrap == Wrap::BehindText { &mut behind } else { &mut front };

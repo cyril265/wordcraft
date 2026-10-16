@@ -4293,7 +4293,7 @@ fn inline_picture_keeps_room_for_its_effects() {
     assert_eq!((c.adv, c.obj_h), (124.0, 89.0), "picture plus effect extents");
     // Drawn inside that room.
     let obj = picture(100.0, 50.0, shadow);
-    let r = display::inline_rect(Some(&obj), 10.0, 200.0, c.adv, c.obj_h);
+    let r = display::inline_rect(obj.frame(), 10.0, 200.0, c.adv, c.obj_h);
     assert_eq!((r.x, r.y, r.w, r.h), (16.0, 123.0, 100.0, 50.0));
 }
 
@@ -5449,6 +5449,44 @@ fn graphic_text_in_a_degenerate_rectangle_is_not_drawn() {
 /// The draws with figures opened up.
 fn flat(draws: Vec<display::Draw>) -> Vec<display::Draw> {
     draws.into_iter().flat_map(|x| if let display::Draw::Figure { draws, .. } = x { draws } else { vec![x] }).collect()
+}
+
+/// A rotated inline text box resizing to fit its text keeps the fitted frame for its place, its
+/// drawing and hit testing: 300 pt wide and as high as its one 17 pt line, margins and outline,
+/// turned by 30° or not.
+#[test]
+fn a_rotated_inline_box_fitted_to_its_text_keeps_its_fitted_frame() {
+    let frames = |rot: f32| {
+        let mut d = Document::from_text("x");
+        let float = wordcraft_doc::para::Float { rot, ..Default::default() };
+        let id = text_box_at(&mut d, &Pos::body(0, 0), "Box", 300.0, 100.0, float);
+        let part = d.parts.get_mut(&id).unwrap();
+        part.body = wordcraft_doc::TextBody { inset: Some([91_440, 45_720, 91_440, 90_000]), auto_fit: true, ..Default::default() };
+        let mut p = wordcraft_doc::Paragraph::with_text("Box", Default::default());
+        p.props.line_spacing = Some(wordcraft_doc::props::LineSpacing::Exactly(17.0));
+        p.props.space_after = Some(0.0);
+        part.blocks = vec![wordcraft_doc::para_block(p)];
+        let l = lay(&d);
+        fn shapes(draws: &[display::Draw], out: &mut Vec<wordcraft_geom::Rect>) {
+            for x in draws {
+                match x {
+                    display::Draw::Shape { rect, .. } => out.push(*rect),
+                    display::Draw::Rotated { items, .. } => shapes(items, out),
+                    _ => {}
+                }
+            }
+        }
+        let mut drawn = Vec::new();
+        shapes(&flat(display::page_display(&d, &l.pages[0], &Default::default())), &mut drawn);
+        (box_rect(&l, id), drawn)
+    };
+    let want = 17.0 + 3.6 + 90_000.0 / 12_700.0 + 0.75;
+    for rot in [0.0, 30.0] {
+        let (r, drawn) = frames(rot);
+        assert!((r.w - 300.0).abs() < 0.01 && (r.h - want).abs() < 0.01, "{rot}°: placed {r:?}, want 300 × {want}");
+        assert_eq!(drawn.len(), 1, "{drawn:?}");
+        assert!((drawn[0].w - r.w).abs() < 0.01 && (drawn[0].h - r.h).abs() < 0.01, "{rot}°: drawn {:?}, placed {r:?}", drawn[0]);
+    }
 }
 
 #[test]

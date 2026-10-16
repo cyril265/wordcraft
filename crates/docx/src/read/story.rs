@@ -1729,7 +1729,7 @@ impl Reader<'_> {
             })
         };
         let stroke = on("stroked").then(|| attr("strokecolor").map_or(Some(Rgb::BLACK), vml_color)).flatten();
-        let stroke_width = attr("strokeweight").and_then(|v| measure(v, 1.0)).unwrap_or(0.75).clamp(0.0, 100.0);
+        let stroke_width = if on("stroked") { attr("strokeweight").and_then(|v| measure(v, 1.0)).unwrap_or(0.75).clamp(0.0, 100.0) } else { 0.0 };
         let fill = vml_fill(shape, shapetype);
         let kind = match shape.local() {
             "line" => Some(ShapeKind::Line),

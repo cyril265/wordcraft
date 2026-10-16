@@ -393,6 +393,8 @@ pub struct ParaLayout {
     /// Room after a cluster between Asian text and Latin text or digits ([`auto_space`]), by
     /// cluster index, sorted. It is part of the cluster's advance, but takes no room at a line's end.
     pub auto_space: Vec<(usize, f32)>,
+    /// Inline drawings laid out at another size than their own ([`ParaEnv::fitted`]).
+    pub fitted: Vec<(usize, f32, f32)>,
 }
 
 /// A shape drawn over a cluster (an enclosed character's circle, square, triangle or diamond),
@@ -456,9 +458,9 @@ pub struct ParaEnv<'a> {
     /// Shrink inline drawings wider than the line to fit it: in text boxes, which don't clip what
     /// runs past their sides. Elsewhere such a drawing keeps its size and the page edge clips it.
     pub fit_objects: bool,
-    /// Heights of the paragraph's inline text boxes that resize to fit their text, by object
-    /// index: they take these instead of their saved heights.
-    pub fitted: &'a [(usize, f32)],
+    /// Inline drawings laid out at another size than their own, as (object index, width,
+    /// height): text boxes that resize to fit their text.
+    pub fitted: &'a [(usize, f32, f32)],
 }
 
 /// The section's document grid as layout applies it (`w:docGrid`, ECMA-376 §17.6.5).
@@ -1612,14 +1614,14 @@ pub fn layout_para(p: &Paragraph, env: &ParaEnv) -> ParaLayout {
                     match p.objects.get(k) {
                         Some(o) if o.is_drawing() => {
                             // A hidden one takes no room, and with no height its line doesn't draw it.
-                            if let Some((w, saved_h, float)) = o.frame()
+                            if let Some((w, h, float)) = o.frame()
                                 && float.wrap == wordcraft_doc::para::Wrap::Inline
                                 && !float.hidden
                             {
+                                let (w, h) = env.fitted.iter().find(|(i, ..)| *i == k).map_or((w, h), |(_, w, h)| (*w, *h));
                                 // A picture wider than the line keeps its size, as in Word: it runs past
                                 // the margin and the page edge clips it (see `ParaEnv::fit_objects`).
                                 let maxw = (env.width - rp.indent_left.max(0.0) - rp.indent_right.max(0.0)).max(18.0);
-                                let h = env.fitted.iter().find(|(i, _)| *i == k).map_or(saved_h, |(_, h)| *h);
                                 let (w, h) = (w.clamp(1.0, 4000.0), h.clamp(1.0, 4000.0));
                                 let s = if env.fit_objects && w > maxw { maxw / w } else { 1.0 };
                                 // The line makes room for effects (shadows) around the picture too, and
@@ -1925,6 +1927,7 @@ pub fn layout_para(p: &Paragraph, env: &ParaEnv) -> ParaLayout {
         left_out: Vec::new(),
         enclosures,
         auto_space,
+        fitted: env.fitted.to_vec(),
     };
     let auto = env.doc.settings.auto_hyphenation && !pl.rp.suppress_hyphens;
     pl.hyph_after = hyphenation_points(&text, to_para, &pl, auto, env.doc.settings.hyphenate_caps, &runs);
@@ -3099,6 +3102,13 @@ impl ParaLayout {
     fn auto_space_after(&self, k: usize) -> f32 {
         self.auto_space.binary_search_by_key(&k, |a| a.0).ok().and_then(|i| self.auto_space.get(i)).map_or(0.0, |a| a.1)
     }
+    /// Inline drawing `obj` (object `oi`)'s size as laid out, and its placement: the size it was
+    /// fitted to ([`ParaLayout::fitted`]), or its own.
+    pub fn object_frame<'o>(&self, oi: usize, obj: &'o InlineObject) -> Option<(f32, f32, &'o wordcraft_doc::para::Float)> {
+        let (w, h, float) = obj.frame()?;
+        Some(self.fitted.iter().find(|(i, ..)| *i == oi).map_or((w, h, float), |(_, w, h)| (*w, *h, float)))
+    }
+
     /// The line the list label is drawn on: the first, unless the paragraph opens with a page
     /// break, when Word draws it with the text on the next page.
     pub fn label_line(&self) -> usize {
