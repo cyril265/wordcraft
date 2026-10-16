@@ -8528,6 +8528,33 @@ fn relaid_paragraphs_keep_their_equation_numbers() {
     assert_eq!(equation_numbers(&l), ["(1)", "(2)", "(3)"]);
 }
 
+/// A paragraph whose box Word keeps above the bottom margin is laid out again around the box's
+/// new place; its numbered equation still counts once: the equations read (1), (2).
+#[test]
+fn a_box_lifted_above_the_page_bottom_keeps_the_equation_numbers() {
+    let eq = |s: &str| InlineObject::Equation {
+        linear: s.into(),
+        display: true,
+        math: wordcraft_doc::math::Math { nodes: wordcraft_doc::math::parse_linear(s), ..Default::default() },
+    };
+    let mut d = Document::from_text("\n");
+    d.settings.compat_mode = 15;
+    d.para_mut(StoryRef::Body, &Path::top(0)).unwrap().insert_object(0, eq("a=b#"), &Default::default()).unwrap();
+    d.para_mut(StoryRef::Body, &Path::top(1)).unwrap().insert_object(0, eq("c=d#"), &Default::default()).unwrap();
+    let float = wordcraft_doc::para::Float {
+        wrap: wordcraft_doc::para::Wrap::Square,
+        v_rel: wordcraft_doc::para::Anchor::Paragraph,
+        h_rel: wordcraft_doc::para::Anchor::Margin,
+        y: 27.15,
+        ..Default::default()
+    };
+    let id = text_box_at(&mut d, &Pos::body(0, 0), "Tall", 200.0, 900.0, float);
+    let l = lay(&d);
+    let r = box_rect(&l, id);
+    assert!(r.y < d.last_section.margin_top + 27.15, "the box is lifted to its paragraph's line: {r:?}");
+    assert_eq!(equation_numbers(&l), ["(1)", "(2)"]);
+}
+
 /// #1116: a document of a top paragraph with `before` points of space before, filler lines, a
 /// paragraph of several lines (block `t`) with 6 pt after and, when `note`, a footnote on its last line.
 fn space_after_doc(before: f32, note: bool) -> (Document, usize, Option<u32>) {

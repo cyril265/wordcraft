@@ -476,6 +476,101 @@ fn hostile_sizes_of_boxes_fitted_to_their_text_still_lay_out() {
     }
 }
 
+/// `k` paragraphs of exact 17 pt lines on an A4 page with Word's synthetic margins (28.35 pt top,
+/// 42.55 pt bottom: the text ends at 799.35), then `ZZZ` anchoring a text box 480 pt wide
+/// stored `h` high, `y` below the paragraph, wrapped as `wrap`, then `AAA` and `BBB`; laid out
+/// in compatibility mode `mode`. The page and frame of the box.
+fn near_bottom(k: usize, y: f32, h: f32, wrap: wordcraft_doc::para::Wrap, dist_bottom: f32, body: TextBody, mode: u32) -> (usize, Rect, f32) {
+    let mut d = Document::new();
+    d.settings.compat_mode = mode;
+    d.last_section.page_w = 595.3;
+    d.last_section.page_h = 841.9;
+    d.last_section.margin_top = 28.35;
+    d.last_section.margin_bottom = 42.55;
+    d.last_section.header = 0.0;
+    d.last_section.footer = 0.0;
+    let mut blocks: Vec<Block> = (0..k).map(|i| Block::Para(exact(&format!("L{i}"), 0.0, 0.0))).collect();
+    blocks.extend([Block::Para(exact("ZZZ", 0.0, 0.0)), Block::Para(exact("AAA", 8.5, 0.0)), Block::Para(exact("BBB", 0.0, 0.0))]);
+    d.body = blocks.into_iter().map(Arc::new).collect();
+    let id = d.add_part(PartKind::TextBox, vec![para_block(exact("BOXA", 0.0, 0.0))]);
+    d.parts.get_mut(&id).unwrap().body = body;
+    let float = wordcraft_doc::para::Float { wrap, y, dist_bottom, ..below_para() };
+    let shape = InlineObject::Shape {
+        kind: wordcraft_doc::para::ShapeKind::TextBox,
+        w: 480.0,
+        h,
+        fill: None,
+        stroke: None,
+        stroke_width: 0.5,
+        float,
+        story: Some(id),
+        effects: Default::default(),
+        freeform: None,
+        extra: Default::default(),
+    };
+    d.insert_object(&Pos::body(k, 3), shape, &Default::default()).unwrap();
+    let l = lay(&d);
+    let (page, rect) = l
+        .pages
+        .iter()
+        .enumerate()
+        .find_map(|(pi, pg)| {
+            pg.items.iter().find_map(|it| match it {
+                Placed::Object { rect, text_box: Some(s), .. } if *s == id => Some((pi, *rect)),
+                _ => None,
+            })
+        })
+        .unwrap();
+    let line = l.pages[page]
+        .items
+        .iter()
+        .find_map(|it| match it {
+            Placed::Lines { story: StoryRef::Body, path, y, .. } if path.0.first() == Some(&(k as u32)) => Some(*y),
+            _ => None,
+        })
+        .unwrap_or(f32::NAN);
+    (page, rect, line)
+}
+
+/// Word, from its 2013 layout on (compatibility mode 15): a box placed relative to its paragraph
+/// with text wrapping around it that would reach below the bottom margin moves up to end there,
+/// but not above the bottom of the paragraph's first line; if it still doesn't fit, the paragraph
+/// starts the next page with it (at the top of a page the box stays below the line, however
+/// tall). Not before Word 2013 layout, not for a box the text doesn't wrap around, and the
+/// distance from text below doesn't count.
+#[test]
+fn a_box_anchored_near_the_page_bottom_stays_above_it_in_word_2013_layout() {
+    use wordcraft_doc::para::Wrap;
+    let fixed = TextBody { auto_fit: false, ..FIT };
+    let at = |k, y, h, wrap, dist, body, mode| {
+        let (page, r, _) = near_bottom(k, y, h, wrap, dist, body, mode);
+        (page, (r.y * 100.0).round() / 100.0, (r.h * 10.0).round() / 10.0)
+    };
+    let cases = [
+        ((42, 27.15, 26.2, Wrap::Square, 0.0, fixed, 15), (0, 769.5, 26.2)),
+        ((42, 30.3, 26.2, Wrap::Square, 0.0, fixed, 15), (0, 772.65, 26.2)),
+        ((42, 31.3, 26.2, Wrap::Square, 0.0, fixed, 15), (0, 773.15, 26.2)),
+        ((42, 27.15, 26.2, Wrap::Square, 9.0, fixed, 15), (0, 769.5, 26.2)),
+        ((43, 27.15, 26.2, Wrap::Square, 0.0, fixed, 15), (1, 55.5, 26.2)),
+        ((44, 27.15, 26.2, Wrap::Square, 0.0, fixed, 15), (1, 55.5, 26.2)),
+        ((43, 27.15, 26.2, Wrap::TopAndBottom, 0.0, fixed, 15), (1, 55.5, 26.2)),
+        ((43, 27.15, 41.2, Wrap::Square, 0.0, FIT, 15), (1, 55.5, 28.2)),
+        ((43, 27.15, 26.2, Wrap::InFrontOfText, 0.0, fixed, 15), (0, 786.5, 26.2)),
+        ((43, 27.15, 26.2, Wrap::Square, 0.0, fixed, 14), (0, 786.5, 26.2)),
+        ((44, 27.15, 26.2, Wrap::Square, 0.0, fixed, 12), (0, 803.5, 26.2)),
+        ((0, 27.15, 900.0, Wrap::Square, 0.0, fixed, 15), (0, 45.35, 900.0)),
+        ((30, 27.15, 900.0, Wrap::Square, 0.0, fixed, 15), (1, 45.35, 900.0)),
+    ];
+    for ((k, y, h, wrap, dist, body, mode), want) in cases {
+        assert_eq!(at(k, y, h, wrap, dist, body, mode), want, "{k} paragraphs, {y} pt below, {h} high, {wrap:?}, mode {mode}");
+    }
+    // The tall box lifted to the bottom of its paragraph's line leaves that line at the top.
+    for k in [0, 30] {
+        let (_, _, line) = near_bottom(k, 27.15, 900.0, Wrap::Square, 0.0, fixed, 15);
+        assert!((line - 28.35).abs() < 0.01, "{k} paragraphs: the line at {line}");
+    }
+}
+
 /// A box shape showing story `id`, `w` × `h`, inline.
 fn box_shape(id: u32, w: f32, h: f32) -> InlineObject {
     InlineObject::Shape {

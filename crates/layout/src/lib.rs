@@ -3436,7 +3436,9 @@ fn anchor_floats(
 ) -> (HashMap<usize, Rect>, Arc<ParaLayout>, Vec<para::Exclusion>) {
     ctx.fields.page = pb.number;
     let (col_x, width) = (pb.col_x(), pb.col_w());
-    let mut rects = HashMap::new();
+    let (mut rects, mut fixed) = (HashMap::new(), HashMap::new());
+    // Where each object's wrap area went among the page's (object index, index in `pb.excl`).
+    let mut slots = Vec::new();
     if !pb.web && place {
         // (A mark from a page before may be short of the areas this page started with.)
         let mark = if excl_mark.0 == pb.pages.len() { excl_mark.1 } else { pb.excl_base };
@@ -3456,7 +3458,7 @@ fn anchor_floats(
                 continue;
             }
             if let Some(r) = pb.fixed_objects.iter().find(|(b, i, _)| *b == block && *i == oi).map(|(_, _, r)| *r) {
-                rects.insert(oi, r);
+                fixed.insert(oi, r);
                 // The text before it was laid out again around it: no pass is needed for it, unless
                 // text the walk doesn't lay out again is still under it (#2048 moves that).
                 let outline = ctx.wrap_outline(o);
@@ -3484,15 +3486,28 @@ fn anchor_floats(
                     Some(k) => {
                         if let Some(slot) = pb.excl.get_mut(k) {
                             *slot = area;
+                            slots.push((oi, k));
                         }
                     }
-                    None => pb.excl.push(area),
+                    None => {
+                        slots.push((oi, pb.excl.len()));
+                        pb.excl.push(area);
+                    }
                 }
             }
         }
     }
-    let rel = rel_exclusions(&body_wraps(ctx, pb), col_x, y0);
-    let pl = ctx.para_wrapped(p, width, None, (&rel, (before, wrap_after)), label.clone());
+    let mut rel = rel_exclusions(&body_wraps(ctx, pb), col_x, y0);
+    let eq_start = ctx.eq_count;
+    let mut pl = ctx.para_wrapped(p, width, None, (&rel, (before, wrap_after)), label.clone());
+    if let Some(line) = pl.lines.first()
+        && lift_above_bottom(ctx, p, &mut rects, pb.bottom, y0 + line.top + line.height)
+    {
+        replace_wrap_areas(ctx, pb, p, &rects, &slots);
+        rel = rel_exclusions(&body_wraps(ctx, pb), col_x, y0);
+        pl = again(ctx, eq_start, |ctx| ctx.para_wrapped(p, width, None, (&rel, (before, wrap_after)), label.clone()));
+    }
+    rects.extend(fixed);
     (rects, pl, rel)
 }
 
@@ -3562,6 +3577,52 @@ fn body_wraps(ctx: &mut Ctx, pb: &PageBuilder) -> Vec<WrapArea> {
     let mut areas = footer_table_wraps(ctx, pb);
     areas.extend_from_slice(&pb.excl);
     areas
+}
+
+/// Put the wrap areas of `p`'s floating objects, moved to `rects`, where their areas went on the
+/// page (`slots`: object index, index in `pb.excl`).
+fn replace_wrap_areas(ctx: &mut Ctx, pb: &mut PageBuilder, p: &Paragraph, rects: &HashMap<usize, Rect>, slots: &[(usize, usize)]) {
+    for (oi, k) in slots {
+        let Some(o) = p.objects.get(*oi) else { continue };
+        let (Some(r), Some((_, _, float))) = (rects.get(oi), floating(o)) else { continue };
+        let outline = ctx.wrap_outline(o);
+        if let (Some(area), Some(slot)) = (wrap_area(*r, float, outline.as_deref().map(|v| v.as_slice())), pb.excl.get_mut(*k)) {
+            *slot = area;
+        }
+    }
+}
+
+/// Whether Word keeps `p`'s floating object `oi` above the bottom of the text, from its 2013
+/// layout on (compatibility mode 15): one placed relative to the paragraph, with text wrapping
+/// around it.
+fn kept_above_bottom(ctx: &Ctx, p: &Paragraph, oi: usize) -> bool {
+    ctx.doc.settings.compat_mode >= 15
+        && p.objects.get(oi).and_then(floating).is_some_and(|(_, _, float)| {
+            float.v_rel == Anchor::Paragraph && matches!(float.wrap, Wrap::Square | Wrap::Tight | Wrap::Through | Wrap::TopAndBottom)
+        })
+}
+
+/// Move up those of `p`'s floating objects at `rects` that Word keeps above `bottom`
+/// ([`kept_above_bottom`]) and that reach below it: to end at `bottom`, but not above
+/// `line_bottom` (the bottom of the paragraph's first line; a thousandth of a point below it,
+/// so that line, laid out again around the object, still clears it after `f32` rounding).
+/// Whether any moved.
+fn lift_above_bottom(ctx: &Ctx, p: &Paragraph, rects: &mut HashMap<usize, Rect>, bottom: f32, line_bottom: f32) -> bool {
+    let mut lifted = false;
+    for (oi, r) in rects.iter_mut() {
+        let y = (bottom - r.h).max(line_bottom + 0.001);
+        if r.bottom() > bottom + 0.01 && y.is_finite() && y < r.y && kept_above_bottom(ctx, p, *oi) {
+            r.y = y;
+            lifted = true;
+        }
+    }
+    lifted
+}
+
+/// Whether one of `p`'s floating objects at `rects` that Word keeps above `bottom` still reaches
+/// below it: Word then starts the paragraph on the next page, with its objects.
+fn floats_overrun(ctx: &Ctx, p: &Paragraph, rects: &HashMap<usize, Rect>, bottom: f32) -> bool {
+    rects.iter().any(|(oi, r)| r.bottom() > bottom + 0.01 && kept_above_bottom(ctx, p, *oi))
 }
 
 /// Where a paragraph's floating objects are positioned from, when they aren't placed already:
@@ -3936,6 +3997,15 @@ fn place_para_in_flow(ctx: &mut Ctx, pb: &mut PageBuilder, p: &Paragraph, block:
         float_page = pb.pages.len().saturating_sub(1);
         (laid_page, laid_width) = (pb.number, pb.col_w());
         anchor_y = y0 - applied_before;
+    }
+    if !pb.web && !pb.at_top() && floats_overrun(ctx, p, &float_rects, pb.bottom) {
+        pb.advance(block, body_top);
+        let y0 = pb.y;
+        (float_rects, pl, rel) = again(ctx, eq_start, |ctx| anchor_floats(ctx, pb, p, block, y0, 0.0, excl_mark, (&label, wrap_after), true));
+        wrap_before = 0.0;
+        float_page = pb.pages.len().saturating_sub(1);
+        (laid_page, laid_width) = (pb.number, pb.col_w());
+        anchor_y = y0;
     }
     let mut n = pl.lines.len();
     // Worked out only for a last line on a page with notes.
