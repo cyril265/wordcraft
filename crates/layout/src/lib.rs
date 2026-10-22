@@ -859,7 +859,12 @@ impl Ctx<'_> {
             .filter(|n| n.num != 0)
             .is_some_and(|n| self.doc.numbering.shows_label(n.num, n.level))
     }
+    /// The list label of `p`, counted. An empty paragraph closing a section has none and doesn't
+    /// count in its list (Word).
     fn next_label(&mut self, p: &Paragraph) -> Option<(String, Level)> {
+        if empty_section_mark(p) {
+            return None;
+        }
         let n = p.props.numbering.or_else(|| self.doc.styles.resolve_para(&p.props).numbering).filter(|n| n.num != 0)?;
         self.counters.next_label(&self.doc.numbering, n.num, n.level)
     }
@@ -3719,7 +3724,7 @@ fn place_para_in_flow(ctx: &mut Ctx, pb: &mut PageBuilder, p: &Paragraph, block:
     let mut anchor_y = pb.y;
     let spot = |pb: &PageBuilder| (pb.pages.len(), pb.col);
     let placed_at = spot(pb);
-    let broke_before = pl.rp.page_break_before && !pb.at_top() && !pb.web;
+    let broke_before = pl.rp.page_break_before && !pb.at_top() && !pb.web && !empty_section_mark(p);
     if broke_before {
         pb.new_page(block, body_top);
     }
@@ -3934,8 +3939,7 @@ fn place_para_in_flow(ctx: &mut Ctx, pb: &mut PageBuilder, p: &Paragraph, block:
                     .is_some_and(|t| t.chars().all(|c| matches!(c, wordcraft_doc::para::PAGE_BREAK | wordcraft_doc::para::COLUMN_BREAK)));
             // An empty paragraph closing a section before a new page: measured in Word, it stays
             // on a full page instead of starting one of its own.
-            let closing_mark = pb.next_starts_page && p.section.is_some() && p.text.is_empty();
-            if over && l1 == l0 && !pb.at_top() && !split && !only_break && !closing_mark {
+            if over && l1 == l0 && !pb.at_top() && !split && !only_break && !closing_mark(p, pb.next_starts_page) {
                 break;
             }
             new_notes.extend(line_notes);
@@ -4079,6 +4083,7 @@ fn place_para_in_flow(ctx: &mut Ctx, pb: &mut PageBuilder, p: &Paragraph, block:
                 p.text.get(l.start..l.stop).is_some_and(|t| !t.is_empty() && t.chars().all(|c| c == wordcraft_doc::para::PAGE_BREAK))
             });
         match forced_break {
+            Some(LineEnd::PageBreak) if mark_with_break && break_starts_no_page(ctx.doc, p, block, pb.next_starts_page) => {}
             Some(LineEnd::PageBreak) if mark_with_break => {
                 pb.new_page(block, body_top);
                 pb.after_break_mark = true;
@@ -4127,6 +4132,33 @@ fn place_para_in_flow(ctx: &mut Ctx, pb: &mut PageBuilder, p: &Paragraph, block:
 fn only_markers(p: &Paragraph, range: std::ops::Range<usize>) -> bool {
     let Some(text) = p.text.get(range.clone()) else { return false };
     text.char_indices().all(|(i, c)| c == wordcraft_doc::para::OBJ && p.object_at(range.start + i).is_some_and(InlineObject::is_marker))
+}
+
+/// Whether `p` is an empty paragraph (nothing but markers) closing its section: Word ignores its
+/// page break before and draws no list label on it.
+fn empty_section_mark(p: &Paragraph) -> bool {
+    p.section.is_some() && only_markers(p, 0..p.text.len())
+}
+
+/// Whether `p` is an empty paragraph closing its section before a section that starts a new
+/// page: Word starts no page for it, neither when it doesn't fit nor after a page break.
+fn closing_mark(p: &Paragraph, next_starts_page: bool) -> bool {
+    next_starts_page && empty_section_mark(p)
+}
+
+/// Whether the page break ending body paragraph `p` at `block` (its mark staying with it) starts
+/// no page (Word): it ends its section (the body, or a section followed by a continuous one,
+/// goes on on the same page), or only an empty paragraph closing the section comes after it
+/// before one that starts a new page (that section starts on the page after the break).
+fn break_starts_no_page(doc: &Document, p: &Paragraph, block: usize, next_starts_page: bool) -> bool {
+    if p.section.is_some() {
+        return true;
+    }
+    match doc.body.get(block.saturating_add(1)).map(|b| &**b) {
+        None => block.saturating_add(1) == doc.body.len(),
+        Some(Block::Para(q)) => p.section.is_none() && closing_mark(q, next_starts_page),
+        Some(Block::Table(_)) => false,
+    }
 }
 
 /// The outline of the body for an Outline view pass.
@@ -4901,6 +4933,8 @@ mod tests;
 mod tests_autospace;
 #[cfg(test)]
 mod tests_bidi;
+#[cfg(test)]
+mod tests_breaks;
 #[cfg(test)]
 mod tests_complex;
 #[cfg(test)]
