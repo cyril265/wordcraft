@@ -2,8 +2,8 @@
 //! (see `float_before`): it moves below one placed over it, beside a narrow one, and stays above
 //! one lower down. The cases are those measured in Word (`docs/layout-parity.md`).
 //!
-//! Paragraphs have exact 17 pt lines and no space before or after (`exact_text`), and none of the
-//! tests depend on where a line breaks, so the results don't depend on the installed fonts.
+//! Paragraphs have exact 17 pt lines and no space before or after (`exact_text`) in the bundled
+//! Source Sans 3 ([`pinned`]), so the results don't depend on the installed fonts.
 use super::tests::{rect_shape, shapes};
 use super::*;
 use wordcraft_doc::para::InlineObject;
@@ -63,11 +63,22 @@ fn table_rect(l: &DocLayout, page: usize, block: u32) -> Option<Rect> {
         .reduce(|a, b| a.union(&b))
 }
 
+/// The bundled font the documents here are set in: its own line (15.9 pt at the default 12 pt) is
+/// shorter than the 17 pt lines and nothing in them depends on the fonts a machine has installed.
+const TEST_FONT: &str = "Source Sans 3";
+
+/// The paragraphs of `text` (one per line) in [`TEST_FONT`].
+fn pinned(text: &str) -> Document {
+    let mut d = Document::from_text(text);
+    d.styles.default_chr.font = Some(TEST_FONT.into());
+    d
+}
+
 /// The paragraphs of `text` (one per line), each with exact 17 pt lines and no space before or
-/// after.
+/// after, in [`TEST_FONT`].
 fn exact_text(text: &str) -> Document {
     use wordcraft_doc::props::LineSpacing;
-    let mut d = Document::from_text(text);
+    let mut d = pinned(text);
     for b in &mut d.body {
         if let Block::Para(p) = Arc::make_mut(b) {
             p.props.line_spacing = Some(LineSpacing::Exactly(17.0));
@@ -163,19 +174,19 @@ fn a_paragraph_before_a_floating_table_lower_down_stays_above_it() {
     assert!(lines(&l, 0, 2).unwrap().1 <= 300.0, "{:?}", lines(&l, 0, 2));
 }
 
+/// Word: eight paragraphs, then a table 100pt down: the first stay above it, the rest go below it
+/// in order. A line the table's top lands on anywhere moves below it: its 17pt (exactly or at
+/// least) are in the way, however short the font's own line (two bundled fonts, 15.9 and 15.8 pt;
+/// see the next test for Word's measurements).
 #[test]
 fn of_the_paragraphs_before_a_floating_table_those_in_its_way_move_below_it() {
-    // Word: eight paragraphs, then a table 100pt down: the first stay above it, the rest go below
-    // it in order. A line the table's top lands on anywhere moves below it: its 17pt (exactly or
-    // at least) are in the way, however short the font's own line (the default font's or a
-    // bundled one's; see the next test for Word's measurements).
     use wordcraft_doc::props::LineSpacing;
     let text_8 = (1..=8).map(|i| format!("Paragraph {i}")).collect::<Vec<_>>().join("\n") + "\nAfter";
-    for font in [None, Some("Source Sans 3")] {
+    for font in [TEST_FONT, "JetBrains Mono"] {
         for spacing in [LineSpacing::Exactly(17.0), LineSpacing::AtLeast(17.0)] {
             for y in (0..17).map(|k| 106.5 + k as f32).chain([160.0]) {
                 let mut d = doc_with_table(&text_8, 8, float_table(612.0, 100.0, on_page(y)));
-                d.styles.default_chr.font = font.map(Into::into);
+                d.styles.default_chr.font = Some(font.into());
                 for b in &mut d.body {
                     if let Block::Para(p) = Arc::make_mut(b) {
                         p.props.line_spacing = Some(spacing);
@@ -194,35 +205,46 @@ fn of_the_paragraphs_before_a_floating_table_those_in_its_way_move_below_it() {
     }
 }
 
+/// Word (Calibri 11 pt, whose own line is 13.4 pt, in exact or at-least 17 pt lines): a full-width
+/// table or square-wrapped shape whose top lands anywhere in the third line, 106 to 123 pt, moves
+/// that line below it, also 16.5 pt into it; a shape at 123 leaves it in place. The same whether
+/// the float comes after the line in the document (a table after it, a shape anchored in a later
+/// paragraph) or before it. Here in two bundled fonts whose own lines (15.9 and 15.8 pt) are
+/// shorter than 16.5 pt, so that the font's line alone would leave the line over a float there.
 #[test]
 fn exact_and_at_least_lines_keep_their_whole_height_clear_of_a_float_before_or_after_its_anchor() {
-    // Word (Calibri 11 pt, whose own line is 13.4 pt, in exact or at-least 17 pt lines): a
-    // full-width table or square-wrapped shape whose top lands anywhere in the third line, 106 to
-    // 123 pt, moves that line below it, also 16.5 pt into it; a shape at 123 leaves it in place.
-    // The same whether the float comes after the line in the document (a table after it, a shape
-    // anchored in a later paragraph) or before it.
     use wordcraft_doc::props::LineSpacing;
     let text_8 = (1..=8).map(|i| format!("P{i} word")).collect::<Vec<_>>().join("\n");
     let square = |y: f32| Float { wrap: Wrap::Square, h_rel: Anchor::Page, v_rel: Anchor::Page, y, ..Default::default() };
-    for font in [None, Some("Source Sans 3")] {
+    let in_font = |mut d: Document, font: &str, spacing: LineSpacing| {
+        d.styles.default_chr.font = Some(font.into());
+        for b in &mut d.body {
+            if let Block::Para(p) = Arc::make_mut(b) {
+                p.props.line_spacing = Some(spacing);
+            }
+        }
+        d
+    };
+    for font in [TEST_FONT, "JetBrains Mono"] {
         for spacing in [LineSpacing::Exactly(17.0), LineSpacing::AtLeast(17.0)] {
+            let plain = lay(&in_font(exact_text(&text_8), font, spacing));
+            let own = plain.pages[0].items.iter().find_map(|it| match it {
+                Placed::Lines { story: StoryRef::Body, para, .. } => para.styles.first().map(|s| s.ascent + s.descent),
+                _ => None,
+            });
+            assert!(own.is_some_and(|h| h < 16.5), "{font}: its own line {own:?} is shorter than 16.5 pt");
+            assert_eq!(lines(&plain, 0, 2).map(|(t, b, _)| (t, b)), Some((106.0, 123.0)), "{font} {spacing:?}: the third line");
             for float_first in [false, true] {
                 for table in [true, false] {
                     for y in (0..17).map(|k| 106.5 + k as f32).chain([123.0]) {
                         if table && y >= 123.0 {
                             continue;
                         }
-                        let mut d = match (table, float_first) {
+                        let d = match (table, float_first) {
                             (true, first) => doc_with_table(&text_8, if first { 0 } else { 5 }, float_table(612.0, 50.0, on_page(y))),
                             (false, first) => doc_with_shape(&text_8, if first { 0 } else { 5 }, 612.0, 50.0, square(y)),
                         };
-                        d.styles.default_chr.font = font.map(Into::into);
-                        for b in &mut d.body {
-                            if let Block::Para(p) = Arc::make_mut(b) {
-                                p.props.line_spacing = Some(spacing);
-                            }
-                        }
-                        let l = lay(&d);
+                        let l = lay(&in_font(d, font, spacing));
                         let float =
                             if table { table_rect(&l, 0, if float_first { 0 } else { 5 }) } else { shapes(&l.pages[0].items).first().copied() };
                         let case = format!("{font:?} {spacing:?} float first {float_first}, table {table}, y {y}");
@@ -391,20 +413,19 @@ fn an_empty_paragraph_before_a_letterhead_table_ends_up_below_the_address_block(
     assert!((top(&l, 0, 2) - top(&without, 0, 1) - empty_pitch()).abs() < 0.5, "{} {}", top(&l, 0, 2), top(&without, 0, 1));
 }
 
+/// Swept over where the table stands, how much text comes before it and how wide it is: every
+/// paragraph is placed once, and none of the text on the table's page overlaps it when it all
+/// still fits there. The lines have automatic 1.15 spacing: in Word 2013 layout a line keeps its
+/// text clear of the table, its extra spacing may run over it ([`text_clear_of`]).
 #[test]
 fn text_before_floating_tables_never_overlaps_them_nor_gets_lost() {
-    // Swept over where the table stands, how much text comes before it and how wide it is: every
-    // paragraph is placed once, and none of the text on the table's page overlaps it when it all
-    // still fits there.
     for y in (0..=720).step_by(45) {
         for n in [0usize, 1, 3, 12, 30, 45] {
             for w in [612.0, 200.0] {
                 let mut text: Vec<String> =
                     (0..n).map(|i| format!("Paragraph {i} before the table, long enough to run over a line or two when it is narrowed.")).collect();
                 text.push("After".into());
-                // (Automatic line spacing, 1.15 lines: in Word 2013 layout a line keeps its text clear of
-                // the table, its extra spacing may run over it.)
-                let mut d = Document::from_text(&text.join("\n"));
+                let mut d = pinned(&text.join("\n"));
                 d.insert_block(
                     StoryRef::Body,
                     &Path::top(n),
@@ -720,7 +741,7 @@ fn spaced(text: &str, after: f32) -> Paragraph {
 
 /// Body paragraphs `paras` with floating table `t` inserted before paragraph `at`.
 fn spaced_doc(paras: Vec<Paragraph>, at: usize, t: Table) -> Document {
-    let mut d = Document::from_text("");
+    let mut d = pinned("");
     d.body = paras.into_iter().map(wordcraft_doc::para_block).collect();
     d.insert_block(StoryRef::Body, &Path::top(at), Block::Table(t)).unwrap();
     d
@@ -829,7 +850,7 @@ fn a_last_lines_space_after_keeps_clear_of_a_floating_shape_and_goes_beside_a_na
     // takes it beside itself.
     for (after, stays) in [(8.0, false), (4.0, true)] {
         let float = Float { wrap: Wrap::TopAndBottom, h_rel: Anchor::Page, v_rel: Anchor::Page, y: 95.0, ..Default::default() };
-        let mut d = Document::from_text("");
+        let mut d = pinned("");
         d.body = [spaced("Before", after), spaced("Anchor", 0.0), spaced("After", 0.0)].into_iter().map(wordcraft_doc::para_block).collect();
         d.insert_object(&Pos::body(1, 0), rect_shape(612.0, 100.0, float), &Default::default()).unwrap();
         let l = lay_12(&d);
@@ -858,7 +879,7 @@ fn text_of_an_earlier_section_keeps_its_space_after_clear_of_a_later_shape_too()
     use wordcraft_doc::section::SectionStart;
     for (after, mode, stays) in [(8.0, wordcraft_doc::LEGACY_COMPAT_MODE, false), (4.0, wordcraft_doc::LEGACY_COMPAT_MODE, true), (8.0, 15, true)] {
         let float = Float { wrap: Wrap::TopAndBottom, h_rel: Anchor::Page, v_rel: Anchor::Page, y: 95.0, ..Default::default() };
-        let mut d = Document::from_text("");
+        let mut d = pinned("");
         let mut earlier = spaced("Earlier", after);
         earlier.section = Some(Box::default());
         d.body = [earlier, spaced("Before", 0.0), spaced("Anchor", 0.0), spaced("After", 0.0)].into_iter().map(wordcraft_doc::para_block).collect();
@@ -884,7 +905,7 @@ fn automatic_line_spacing_keeps_the_whole_line_and_its_space_after_clear() {
         p.props.line_spacing = Some(LineSpacing::Multiple(1.0));
         p
     };
-    let mut plain = Document::from_text("");
+    let mut plain = pinned("");
     plain.body = vec![wordcraft_doc::para_block(single("Before", 0.0))];
     let bottom = lines(&lay_12(&plain), 0, 0).unwrap().1;
     for (y, stays) in [(bottom + 8.5, true), (bottom + 7.5, false), (bottom + 0.5, false)] {
@@ -935,7 +956,7 @@ fn automatic_space_after_counts_before_a_paragraph_that_shows_no_list_label() {
 /// A paragraph of two inline drawings 150 pt wide with a space between, exact 17 pt lines and
 /// `after` after: font-independent widths that fill one strip each beside a shape in the middle.
 fn two_drawings(after: f32) -> Document {
-    let mut d = Document::from_text("");
+    let mut d = pinned("");
     d.body = vec![wordcraft_doc::para_block(spaced(" ", after))];
     d.insert_object(&Pos::body(0, 1), rect_shape(150.0, 10.0, Float::default()), &Default::default()).unwrap();
     d.insert_object(&Pos::body(0, 0), rect_shape(150.0, 10.0, Float::default()), &Default::default()).unwrap();
@@ -1013,7 +1034,7 @@ fn the_empty_line_after_a_final_line_break_goes_beside_a_narrow_float_in_its_str
         assert!((top(&l, 0, 2) - (106.0 + after)).abs() < 0.01, "after {after}: {}", top(&l, 0, 2));
 
         let square = Float { wrap: Wrap::Square, h_rel: Anchor::Margin, v_rel: Anchor::Page, y: 40.0, ..Default::default() };
-        let mut d = Document::from_text("");
+        let mut d = pinned("");
         d.body = [spaced("Before\n", after), spaced("After", 0.0)].into_iter().map(wordcraft_doc::para_block).collect();
         d.insert_object(&Pos::body(0, 0), rect_shape(200.0, 100.0, square), &Default::default()).unwrap();
         let l = lay_12(&d);
@@ -1038,7 +1059,7 @@ fn in_word_2013_layout_only_the_line_keeps_clear_of_a_float_not_its_space_after(
     let shape = |mode: u32, y: f32, dist: f32| {
         let float =
             Float { wrap: Wrap::TopAndBottom, h_rel: Anchor::Page, v_rel: Anchor::Page, y, dist_top: dist, dist_bottom: dist, ..Default::default() };
-        let mut d = Document::from_text("");
+        let mut d = pinned("");
         d.body = [spaced("Before", 8.0), spaced("Anchor", 0.0)].into_iter().map(wordcraft_doc::para_block).collect();
         d.insert_object(&Pos::body(1, 0), rect_shape(612.0, 100.0, float), &Default::default()).unwrap();
         d.settings.compat_mode = mode;
@@ -1075,7 +1096,7 @@ fn an_empty_paragraph_below_a_box_its_paragraph_before_anchors_keeps_only_its_ow
             dist_bottom: 3.6,
             ..Default::default()
         };
-        let mut d = Document::from_text("");
+        let mut d = pinned("");
         d.body = [spaced("Address\n", 30.0), spaced("", 30.0), spaced("Item", 0.0)].into_iter().map(wordcraft_doc::para_block).collect();
         d.insert_object(&Pos::body(0, 0), rect_shape(468.0, 87.5, float), &Default::default()).unwrap();
         d.settings.compat_mode = mode;
@@ -1104,7 +1125,7 @@ fn a_paragraph_moved_below_a_floating_table_or_shape_keeps_its_space_before_ther
         let float = Float { wrap: Wrap::TopAndBottom, h_rel: Anchor::Page, v_rel: Anchor::Page, y: 92.0, ..Default::default() };
         let mut anchor = spaced("Anchor", 0.0);
         anchor.props.space_before = Some(before);
-        let mut d = Document::from_text("");
+        let mut d = pinned("");
         d.body = [spaced("Before", 0.0), anchor].into_iter().map(wordcraft_doc::para_block).collect();
         d.insert_object(&Pos::body(1, 0), rect_shape(612.0, 100.0, float), &Default::default()).unwrap();
         let l = lay(&d);
@@ -1132,7 +1153,7 @@ fn in_mode(mut d: Document, mode: u32) -> DocLayout {
 
 #[test]
 fn in_word_2013_layout_a_line_keeps_its_text_clear_of_a_float_not_its_extra_line_spacing() {
-    let mut single = Document::from_text("");
+    let mut single = pinned("");
     single.body = vec![wordcraft_doc::para_block(multiple("Before", 1.0))];
     let natural = lines(&lay(&single), 0, 0).unwrap().1 - 72.0;
     for m in [1.15, 2.0] {
@@ -1161,7 +1182,7 @@ fn in_word_2013_layout_a_line_keeps_its_text_clear_of_a_float_not_its_extra_line
 #[test]
 fn a_line_of_pictures_keeps_only_them_clear_of_a_float_in_word_2013_layout_and_their_paragraph_mark_before() {
     let picture = |text: &str, w: f32, m: f32| {
-        let mut d = Document::from_text("");
+        let mut d = pinned("");
         d.body = vec![wordcraft_doc::para_block(multiple(text, m)), wordcraft_doc::para_block(multiple("After", m))];
         d.insert_object(&Pos::body(0, 0), rect_shape(w, 33.2, Float::default()), &Default::default()).unwrap();
         d
