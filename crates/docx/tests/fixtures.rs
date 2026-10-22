@@ -1741,6 +1741,70 @@ fn word_group_with_nested_group() {
     assert_eq!(got, [(0.0, 0.0, ShapeKind::Rectangle, 100.0, 50.0), (110.0, 60.0, ShapeKind::Ellipse, 20.0, 10.0)]);
 }
 
+/// Group members filled with the group's fill (`a:grpFill`, as Word writes a panel with its text
+/// boxes) take the fill of the group around them, or of the nearest group around that which has
+/// one; a group without a fill (or with `a:noFill`) leaves them unfilled. The style's fill
+/// (`a:fillRef`) doesn't apply. As measured in Word for Mac: a rounded rectangle and a text box
+/// with `a:grpFill` in a group filled `bg1` at 95% luminance are F2F2F2; in a group without a
+/// fill, none; in a group without a fill inside a red group, red.
+#[test]
+fn group_members_with_the_groups_fill_take_its_colour() {
+    let style = r#"<wps:style><a:lnRef idx="2"><a:schemeClr val="accent1"/></a:lnRef><a:fillRef idx="1"><a:schemeClr val="accent1"/></a:fillRef><a:effectRef idx="0"><a:schemeClr val="accent1"/></a:effectRef><a:fontRef idx="minor"><a:schemeClr val="lt1"/></a:fontRef></wps:style>"#;
+    let member = |id: u32, prst: &str, fill: &str, style: &str| {
+        format!(
+            r#"<wps:wsp><wps:cNvPr id="{id}" name="m{id}"/><wps:cNvSpPr/><wps:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="1000" cy="1000"/></a:xfrm><a:prstGeom prst="{prst}"><a:avLst/></a:prstGeom>{fill}<a:ln><a:solidFill><a:srgbClr val="00A000"/></a:solidFill></a:ln></wps:spPr>{style}<wps:bodyPr/></wps:wsp>"#
+        )
+    };
+    let grp = r#"<a:grpFill/>"#;
+    let solid = |c: &str| format!(r#"<a:solidFill><a:srgbClr val="{c}"/></a:solidFill>"#);
+    let props = |fill: &str| {
+        format!(r#"<a:xfrm><a:off x="0" y="0"/><a:ext cx="1000" cy="1000"/><a:chOff x="0" y="0"/><a:chExt cx="1000" cy="1000"/></a:xfrm>{fill}"#)
+    };
+    let group = |fill: &str, members: &str| {
+        format!(
+            r#"<w:p><w:r><w:drawing><wp:anchor distT="0" distB="0" distL="0" distR="0" simplePos="0" relativeHeight="1" behindDoc="0" locked="0" layoutInCell="1" allowOverlap="1"><wp:simplePos x="0" y="0"/><wp:positionH relativeFrom="column"><wp:posOffset>0</wp:posOffset></wp:positionH><wp:positionV relativeFrom="paragraph"><wp:posOffset>0</wp:posOffset></wp:positionV><wp:extent cx="1270000" cy="1270000"/><wp:effectExtent l="0" t="0" r="0" b="0"/><wp:wrapNone/><wp:docPr id="1" name="G"/><wp:cNvGraphicFramePr/><a:graphic><a:graphicData uri="http://schemas.microsoft.com/office/word/2010/wordprocessingGroup"><wpg:wgp><wpg:cNvGrpSpPr/><wpg:grpSpPr>{}</wpg:grpSpPr>{members}</wpg:wgp></a:graphicData></a:graphic></wp:anchor></w:drawing></w:r></w:p>"#,
+            props(fill)
+        )
+    };
+    let nested =
+        |fill: &str, members: &str| format!(r#"<wpg:grpSp><wpg:cNvGrpSpPr/><wpg:grpSpPr>{}</wpg:grpSpPr>{members}</wpg:grpSp>"#, props(fill));
+    let grey = r#"<a:solidFill><a:schemeClr val="bg1"><a:lumMod val="95000"/></a:schemeClr></a:solidFill>"#;
+    let body = [
+        group(
+            grey,
+            &[member(2, "roundRect", grp, style), member(3, "rect", grp, ""), member(4, "line", grp, style), member(5, "rect", &solid("FF0000"), "")]
+                .concat(),
+        ),
+        group("", &[member(2, "rect", grp, style), member(3, "rect", "", style)].concat()),
+        group(&solid("FF0000"), &[nested("", &member(2, "rect", grp, "")), nested(&solid("0000FF"), &member(3, "rect", grp, ""))].concat()),
+        group("<a:noFill/>", &member(2, "rect", grp, style)),
+    ]
+    .concat();
+    let fills = |d: &Document| -> Vec<Vec<Option<Fill>>> {
+        paras(d)
+            .iter()
+            .map(|p| match &p.objects[0] {
+                InlineObject::Group { children, .. } => children
+                    .iter()
+                    .map(|c| match &c.obj {
+                        InlineObject::Shape { fill, .. } => fill.clone(),
+                        o => panic!("{o:?}"),
+                    })
+                    .collect(),
+                o => panic!("{o:?}"),
+            })
+            .collect()
+    };
+    let solid = |c: Rgb| Some(Fill::solid(c));
+    let (grey, red, blue, accent1) = (solid(Rgb(0xF2, 0xF2, 0xF2)), solid(Rgb(0xFF, 0, 0)), solid(Rgb(0, 0, 0xFF)), solid(Rgb(0x15, 0x60, 0x82)));
+    let want = vec![vec![grey.clone(), grey, None, red.clone()], vec![None, accent1], vec![red, blue], vec![None]];
+    let d = read_body(&body);
+    assert_eq!(fills(&d), want);
+    // Saved with the fill each member is drawn with.
+    let again = wordcraft_docx::read(&wordcraft_docx::write(&d).unwrap()).unwrap();
+    assert_eq!(fills(&again), want);
+}
+
 /// The first object of the first paragraph, made mutable.
 fn first_object(doc: &mut Document) -> &mut InlineObject {
     let Some(wordcraft_doc::Block::Para(p)) = doc.body.first_mut().map(std::sync::Arc::make_mut) else { panic!("a paragraph") };
