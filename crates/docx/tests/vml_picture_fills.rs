@@ -1,0 +1,339 @@
+//! VML rectangles and text boxes filled with a picture (`v:fill type="frame"`, ECMA-376 Part 4,
+//! VML `fill`), read as Word draws them: the shape's fill colour under the picture when the
+//! picture may let it through, the picture stretched over the shape, then its outline and text.
+//! Fixtures are hand-written; the pictures are PNG and JPEG headers built here.
+
+use std::io::Write;
+
+use wordcraft_doc::fill::Fill;
+use wordcraft_doc::para::{Anchor, ShapeKind, Wrap};
+use wordcraft_doc::props::Rgb;
+use wordcraft_doc::{Document, InlineObject, Paragraph};
+
+const NS: &str = r#"xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:v="urn:schemas-microsoft-com:vml" xmlns:o="urn:schemas-microsoft-com:office:office""#;
+const PAGE: &str = "position:absolute;margin-left:100pt;margin-top:100pt;width:200pt;height:100pt;z-index:1;mso-position-horizontal-relative:page;mso-position-vertical-relative:page";
+const FRAME: &str = r#"<v:fill type="frame" o:title="pic" r:id="rIdImg"/>"#;
+const TEXT_BOX_TYPE: &str = r#"<v:shapetype id="_x0000_t202" coordsize="21600,21600" o:spt="202" path="m,l,21600r21600,l21600,xe"/>"#;
+const CYAN: Rgb = Rgb(0, 0xFF, 0xFF);
+
+/// An opaque fill in `color`.
+fn solid(color: Rgb) -> Option<Fill> {
+    Some(Fill::solid(color))
+}
+
+/// A PNG's signature, its header with colour type `colour` and the chunks named `chunks`, empty:
+/// enough for its kind of colour to be told.
+fn png(colour: u8, chunks: &[&[u8; 4]]) -> Vec<u8> {
+    let mut b = b"\x89PNG\r\n\x1a\n".to_vec();
+    b.extend_from_slice(&13u32.to_be_bytes());
+    b.extend_from_slice(b"IHDR");
+    b.extend_from_slice(&200u32.to_be_bytes());
+    b.extend_from_slice(&100u32.to_be_bytes());
+    b.extend_from_slice(&[8, colour, 0, 0, 0, 0, 0, 0, 0]);
+    for name in chunks {
+        b.extend_from_slice(&0u32.to_be_bytes());
+        b.extend_from_slice(*name);
+        b.extend_from_slice(&[0; 4]);
+    }
+    b
+}
+
+/// An opaque PNG (true colour, no transparent colour).
+fn opaque() -> Vec<u8> {
+    png(2, &[b"IDAT"])
+}
+
+/// A PNG with an alpha channel.
+fn see_through() -> Vec<u8> {
+    png(6, &[b"IDAT"])
+}
+
+fn read(body: &str, picture: &[u8]) -> Document {
+    let root = r#"<?xml version="1.0" encoding="UTF-8"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>"#;
+    let rels = r#"<?xml version="1.0" encoding="UTF-8"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdImg" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="media/fill.png"/></Relationships>"#;
+    let doc = format!(r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:document {NS}><w:body>{body}</w:body></w:document>"#);
+    let mut zw = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+    for (name, bytes) in [
+        ("_rels/.rels", root.as_bytes()),
+        ("word/document.xml", doc.as_bytes()),
+        ("word/_rels/document.xml.rels", rels.as_bytes()),
+        ("word/media/fill.png", picture),
+    ] {
+        zw.start_file(name, zip::write::SimpleFileOptions::default()).unwrap();
+        zw.write_all(bytes).unwrap();
+    }
+    wordcraft_docx::read(&zw.finish().unwrap().into_inner()).unwrap()
+}
+
+fn saved(d: &Document) -> Document {
+    wordcraft_docx::read(&wordcraft_docx::write(d).unwrap()).unwrap()
+}
+
+fn paras(d: &Document) -> Vec<&Paragraph> {
+    d.body.iter().filter_map(|b| b.as_para()).collect()
+}
+
+fn para(pict: &str) -> String {
+    format!(r#"<w:p><w:r><w:pict>{pict}</w:pict></w:r></w:p>"#)
+}
+
+fn rect(style: &str, attrs: &str, fill: &str) -> String {
+    para(&format!(r#"<v:rect style="{style}" {attrs}>{fill}</v:rect>"#))
+}
+
+fn text_box(style: &str, attrs: &str, text: &str) -> String {
+    para(&format!(
+        r##"{TEXT_BOX_TYPE}<v:shape type="#_x0000_t202" style="{style}" {attrs}>{FRAME}<v:textbox><w:txbxContent><w:p><w:r><w:t>{text}</w:t></w:r></w:p></w:txbxContent></v:textbox></v:shape>"##
+    ))
+}
+
+fn image(o: &InlineObject) -> Option<(String, f32, f32, Wrap, f32, f32, [f32; 4])> {
+    match o {
+        InlineObject::Image { media, w, h, float, crop, .. } => Some((media.clone(), *w, *h, float.wrap, float.x, float.y, *crop)),
+        _ => None,
+    }
+}
+
+fn on_page(o: &InlineObject) -> bool {
+    o.frame().is_some_and(|(_, _, f)| (f.h_rel, f.v_rel, f.x, f.y) == (Anchor::Page, Anchor::Page, 100.0, 100.0))
+}
+
+/// What a layer of a picture-filled shape is: the picture (its size and offset), or a shape (its
+/// kind, fill, outline and whether it has text).
+#[derive(Clone, Debug, PartialEq)]
+enum Layer {
+    Picture(f32, f32, f32, f32, f32),
+    Shape(ShapeKind, Option<Fill>, Option<Rgb>, bool),
+}
+
+fn layer(x: f32, y: f32, o: &InlineObject) -> Layer {
+    match o {
+        InlineObject::Image { w, h, float, .. } => Layer::Picture(x, y, *w, *h, float.rot),
+        InlineObject::Shape { kind, fill, stroke, story, .. } => Layer::Shape(*kind, fill.clone(), *stroke, story.is_some()),
+        o => panic!("{o:?}"),
+    }
+}
+
+/// A group's size and its members as layers.
+fn layers(o: &InlineObject) -> Option<(f32, f32, Vec<Layer>)> {
+    match o {
+        InlineObject::Group { w, h, ch_w, ch_h, children, canvas: None, .. } if (ch_w, ch_h) == (w, h) => {
+            Some((*w, *h, children.iter().map(|c| layer(c.x, c.y, &c.obj)).collect()))
+        }
+        _ => None,
+    }
+}
+
+fn part_text(d: &Document, o: &InlineObject) -> Vec<String> {
+    o.text_boxes().iter().flat_map(|id| d.parts[id].blocks.iter().filter_map(|b| b.as_para()).map(|p| p.text.clone())).collect()
+}
+
+/// Word draws the picture stretched over the shape's box, the outline and text over it, and only
+/// when the fill has an `o:title`; tiles, patterns, a fill without a type, a shape that isn't
+/// filled, a rounded rectangle, a half-transparent fill, a kept aspect, a missing picture and a
+/// fill turned off leave the shape as it was. An opaque picture hides the fill colour, so none is
+/// kept under it.
+#[test]
+fn vml_shapes_filled_with_a_picture_are_drawn_with_it() {
+    let body = [
+        rect(PAGE, r#"stroked="f""#, FRAME),
+        rect(PAGE, "", FRAME),
+        rect(PAGE, r#"strokecolor="white [3212]""#, r#"<v:fill type="frame" o:title="" recolor="t" r:id="rIdImg"/>"#),
+        text_box(PAGE, "", "boxed"),
+        rect("width:100pt;height:50pt", r#"stroked="f""#, FRAME),
+        rect(PAGE, "", r#"<v:fill type="frame" r:id="rIdImg"/>"#),
+        rect(PAGE, "", r#"<v:fill type="tile" o:title="pic" r:id="rIdImg"/>"#),
+        rect(PAGE, r##"fillcolor="#00ffff""##, r#"<v:fill o:title="pic" r:id="rIdImg"/>"#),
+        rect(PAGE, r#"filled="f""#, FRAME),
+        para(&format!(r#"<v:roundrect style="{PAGE}" arcsize="30%">{FRAME}</v:roundrect>"#)),
+        rect(PAGE, "", r#"<v:fill type="frame" o:title="pic" opacity="32768f" r:id="rIdImg"/>"#),
+        rect(PAGE, "", r#"<v:fill type="frame" o:title="pic" aspect="atLeast" r:id="rIdImg"/>"#),
+        rect(PAGE, "", r#"<v:fill type="frame" o:title="pic" r:id="rIdNone"/>"#),
+        rect(PAGE, "", r#"<v:fill type="frame" o:title="pic" on="False" r:id="rIdImg"/>"#),
+    ]
+    .concat();
+    let d = read(&body, &opaque());
+    let ps = paras(&d);
+    assert_eq!(image(&ps[0].objects[0]), Some(("fill.png".into(), 200.0, 100.0, Wrap::InFrontOfText, 100.0, 100.0, [0.0; 4])));
+    assert!(on_page(&ps[0].objects[0]));
+    for (i, stroke) in [(1, Rgb::BLACK), (2, Rgb::WHITE)] {
+        let want = vec![Layer::Picture(0.0, 0.0, 200.0, 100.0, 0.0), Layer::Shape(ShapeKind::Rectangle, None, Some(stroke), false)];
+        assert_eq!(layers(&ps[i].objects[0]), Some((200.0, 100.0, want)), "{i}");
+        assert!(on_page(&ps[i].objects[0]), "{i}");
+    }
+    let boxed = vec![Layer::Picture(0.0, 0.0, 200.0, 100.0, 0.0), Layer::Shape(ShapeKind::TextBox, None, Some(Rgb::BLACK), true)];
+    assert_eq!(layers(&ps[3].objects[0]), Some((200.0, 100.0, boxed)));
+    assert_eq!(part_text(&d, &ps[3].objects[0]), ["boxed"]);
+    assert_eq!(image(&ps[4].objects[0]), Some(("fill.png".into(), 100.0, 50.0, Wrap::Inline, 0.0, 0.0, [0.0; 4])));
+    let shape = |i: usize| match &ps[i].objects[0] {
+        InlineObject::Shape { kind, fill, stroke, .. } => Some((*kind, fill.clone(), *stroke)),
+        _ => None,
+    };
+    let black = Some(Rgb::BLACK);
+    let white = || solid(Rgb::WHITE);
+    assert_eq!(shape(5), Some((ShapeKind::Rectangle, white(), black)), "no o:title");
+    assert_eq!(shape(6), Some((ShapeKind::Rectangle, white(), black)), "tiled");
+    assert_eq!(shape(7), Some((ShapeKind::Rectangle, solid(CYAN), black)), "no type");
+    assert_eq!(shape(8), Some((ShapeKind::Rectangle, None, black)), "not filled");
+    assert_eq!(shape(9), Some((ShapeKind::RoundedRectangle, white(), black)), "rounded");
+    let half = Some(Fill::Solid { color: Rgb::WHITE, transparency: 50.0 });
+    assert_eq!(shape(10), Some((ShapeKind::Rectangle, half, black)), "half transparent");
+    assert_eq!(shape(11), Some((ShapeKind::Rectangle, white(), black)), "aspect kept");
+    assert_eq!(shape(12), Some((ShapeKind::Rectangle, white(), black)), "no picture");
+    assert_eq!(shape(13), Some((ShapeKind::Rectangle, None, black)), "fill turned off");
+    // Saved as a DrawingML picture and groups, and read back the same.
+    let again = saved(&d);
+    let back = paras(&again);
+    assert_eq!(image(&back[0].objects[0]), image(&ps[0].objects[0]));
+    assert!(on_page(&back[0].objects[0]));
+    for i in 1..4 {
+        assert_eq!(layers(&back[i].objects[0]), layers(&ps[i].objects[0]), "{i}");
+        assert!(on_page(&back[i].objects[0]), "{i}");
+    }
+    assert_eq!(part_text(&again, &back[3].objects[0]), ["boxed"]);
+    assert_eq!(again.media.values().map(|m| m.as_slice()).collect::<Vec<_>>(), [opaque().as_slice()]);
+}
+
+/// Word draws the shape's fill colour under the picture: cyan shows through a picture's
+/// transparent half (Word for Mac, a cyan rectangle and text box with a picture whose left half
+/// is transparent). Kept for any picture that may be transparent, also after a save; an opaque
+/// one (a JPEG, a PNG with neither alpha nor a transparent colour) hides it.
+#[test]
+fn the_fill_colour_stays_under_a_picture_that_may_be_transparent() {
+    let body = [
+        rect(PAGE, r##"fillcolor="#00ffff""##, FRAME),
+        text_box(PAGE, r##"fillcolor="#00ffff" strokecolor="blue""##, "TBTEXT"),
+        rect(PAGE, r##"fillcolor="#00ffff" stroked="f""##, FRAME),
+    ]
+    .concat();
+    let d = read(&body, &see_through());
+    let ps = paras(&d);
+    let under = Layer::Shape(ShapeKind::Rectangle, solid(CYAN), None, false);
+    let picture = || Layer::Picture(0.0, 0.0, 200.0, 100.0, 0.0);
+    let want = [
+        vec![under.clone(), picture(), Layer::Shape(ShapeKind::Rectangle, None, Some(Rgb::BLACK), false)],
+        vec![under.clone(), picture(), Layer::Shape(ShapeKind::TextBox, None, Some(Rgb(0, 0, 0xFF)), true)],
+        vec![under.clone(), picture()],
+    ];
+    for (i, want) in want.into_iter().enumerate() {
+        assert_eq!(layers(&ps[i].objects[0]), Some((200.0, 100.0, want)), "{i}");
+        assert!(on_page(&ps[i].objects[0]), "{i}");
+    }
+    assert_eq!(part_text(&d, &ps[1].objects[0]), ["TBTEXT"]);
+    let again = saved(&d);
+    let back = paras(&again);
+    for i in 0..3 {
+        assert_eq!(layers(&back[i].objects[0]), layers(&ps[i].objects[0]), "{i} saved");
+        assert!(on_page(&back[i].objects[0]), "{i} saved");
+    }
+    assert_eq!(part_text(&again, &back[1].objects[0]), ["TBTEXT"]);
+    // Which pictures may be transparent.
+    let jpeg = [0xFF, 0xD8, 0xFF, 0xE0, 0, 16];
+    for (picture, clear) in [
+        (jpeg.to_vec(), false),
+        (opaque(), false),
+        (png(0, &[b"IDAT"]), false),
+        (png(3, &[b"PLTE", b"IDAT"]), false),
+        (png(3, &[b"PLTE", b"tRNS", b"IDAT"]), true),
+        (png(2, &[b"tRNS", b"IDAT"]), true),
+        (png(4, &[b"IDAT"]), true),
+        (see_through(), true),
+        (png(2, &[]), true),
+        (b"not a picture".to_vec(), true),
+    ] {
+        let d = read(&rect(PAGE, r##"fillcolor="#00ffff" stroked="f""##, FRAME), &picture);
+        let o = &paras(&d)[0].objects[0];
+        assert_eq!(image(o).is_none(), clear, "{picture:?}: {o:?}");
+    }
+}
+
+/// Word draws the picture upright: a shape turned by a quarter turn has it over its turned box
+/// (a group member turned 90° in Word for Mac: its 150 × 50 box drawn 50 × 150, the picture
+/// upright in it), half a turn draws it as it is. At other angles Word cuts the upright picture
+/// to the turned shape, which isn't followed: the shape keeps its fill, as before.
+#[test]
+fn turned_shapes_filled_with_a_picture() {
+    let turned = |rot: &str| format!("{PAGE};rotation:{rot}");
+    let body = [
+        text_box(&turned("180"), "", "half"),
+        rect(&turned("90"), r#"strokecolor="red""#, FRAME),
+        rect(&turned("30"), "", FRAME),
+        rect(&format!("{PAGE};flip:x"), "", FRAME),
+    ]
+    .concat();
+    let d = read(&body, &opaque());
+    let ps = paras(&d);
+    let spin = |o: &InlineObject| o.frame().map(|(_, _, f)| f.rot);
+    let half = vec![Layer::Picture(0.0, 0.0, 200.0, 100.0, 180.0), Layer::Shape(ShapeKind::TextBox, None, Some(Rgb::BLACK), true)];
+    assert_eq!(layers(&ps[0].objects[0]), Some((200.0, 100.0, half)));
+    assert_eq!(spin(&ps[0].objects[0]), Some(180.0));
+    let quarter = vec![Layer::Picture(50.0, -50.0, 100.0, 200.0, 270.0), Layer::Shape(ShapeKind::Rectangle, None, Some(Rgb(0xFF, 0, 0)), false)];
+    assert_eq!(layers(&ps[1].objects[0]), Some((200.0, 100.0, quarter)));
+    assert_eq!(spin(&ps[1].objects[0]), Some(90.0));
+    for i in [2, 3] {
+        assert!(
+            matches!(&ps[i].objects[0], InlineObject::Shape { kind: ShapeKind::Rectangle, fill, .. } if *fill == solid(Rgb::WHITE)),
+            "{i}: {:?}",
+            ps[i].objects[0]
+        );
+    }
+}
+
+/// A `v:group`'s members filled with a picture: each member's layers are members of the group in
+/// its place, the turned one's picture upright over its turned box (Word for Mac: a 300 × 200 pt
+/// group with `coordsize` 600,400 draws its members' pictures at 0,0 200 × 100, at 150,75
+/// 50 × 150 for the member turned 90° whose box is 150 × 50 at 100,125, and at 210,0 90 × 100
+/// for a text box in a nested group).
+#[test]
+fn group_members_filled_with_a_picture() {
+    let member =
+        |el: &str, style: &str, attrs: &str, inner: &str| format!(r#"<{el} style="position:absolute;{style}" {attrs}>{FRAME}{inner}</{el}>"#);
+    let group = [
+        r#"<v:group style="position:absolute;margin-left:100pt;margin-top:100pt;width:300pt;height:200pt" coordorigin="0,0" coordsize="600,400">"#
+            .to_string(),
+        member("v:rect", "left:0;top:0;width:400;height:200", r#"strokecolor="red" strokeweight="2pt""#, ""),
+        member("v:rect", "left:200;top:250;width:300;height:100;rotation:90", r#"stroked="f""#, ""),
+        member("v:rect", "left:0;top:250;width:160;height:100;visibility:hidden", r##"fillcolor="#00ffff" stroked="f""##, ""),
+        r#"<v:group style="position:absolute;left:420;top:0;width:180;height:200" coordorigin="0,0" coordsize="180,200">"#.to_string(),
+        member(
+            "v:shape",
+            "left:0;top:0;width:180;height:200",
+            r##"type="#_x0000_t202" fillcolor="#00ffff" strokecolor="blue""##,
+            "<v:textbox><w:txbxContent><w:p><w:r><w:t>GRPTEXT</w:t></w:r></w:p></w:txbxContent></v:textbox>",
+        ),
+        "</v:group></v:group>".to_string(),
+    ]
+    .concat();
+    for (picture, clear) in [(opaque(), false), (see_through(), true)] {
+        let d = read(&para(&format!("{TEXT_BOX_TYPE}{group}")), &picture);
+        let InlineObject::Group { w, h, ch_w, ch_h, children, .. } = &paras(&d)[0].objects[0] else { panic!("{:?}", paras(&d)[0].objects) };
+        assert_eq!((*w, *h, *ch_w, *ch_h), (300.0, 200.0, 600.0, 400.0));
+        let got: Vec<(f32, f32, Layer, f32, bool)> = children
+            .iter()
+            .map(|c| {
+                let f = c.obj.frame().map(|(_, _, f)| (f.rot, f.hidden)).unwrap_or_default();
+                (c.x, c.y, layer(0.0, 0.0, &c.obj), f.0, f.1)
+            })
+            .collect();
+        let pic = |w: f32, h: f32| Layer::Picture(0.0, 0.0, w, h, 0.0);
+        let mut want = vec![];
+        let under = |want: &mut Vec<_>, x, y, rot, hidden, fill| {
+            if clear {
+                want.push((x, y, Layer::Shape(ShapeKind::Rectangle, fill, None, false), rot, hidden));
+            }
+        };
+        under(&mut want, 0.0, 0.0, 0.0, false, solid(Rgb::WHITE));
+        want.push((0.0, 0.0, pic(400.0, 200.0), 0.0, false));
+        want.push((0.0, 0.0, Layer::Shape(ShapeKind::Rectangle, None, Some(Rgb(0xFF, 0, 0)), false), 0.0, false));
+        under(&mut want, 200.0, 250.0, 90.0, false, solid(Rgb::WHITE));
+        want.push((300.0, 150.0, pic(100.0, 300.0), 0.0, false));
+        under(&mut want, 0.0, 250.0, 0.0, true, solid(CYAN));
+        want.push((0.0, 250.0, pic(160.0, 100.0), 0.0, true));
+        under(&mut want, 420.0, 0.0, 0.0, false, solid(CYAN));
+        want.push((420.0, 0.0, pic(180.0, 200.0), 0.0, false));
+        want.push((420.0, 0.0, Layer::Shape(ShapeKind::TextBox, None, Some(Rgb(0, 0, 0xFF)), true), 0.0, false));
+        assert_eq!(got, want, "clear {clear}");
+        let text: Vec<String> = children.iter().flat_map(|c| part_text(&d, &c.obj)).collect();
+        assert_eq!(text, ["GRPTEXT"]);
+    }
+}
