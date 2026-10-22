@@ -235,11 +235,12 @@ fn docx_with_font_table(body: &str, fonts: &str, defaults: &str, style: &str, mi
     zip.finish().unwrap().into_inner()
 }
 
+/// Measured in Word: a font it doesn't have is drawn in the font table's `w:altName` (when it
+/// has that font) whether a run, the theme (`w:asciiTheme`), the document defaults or a
+/// paragraph style names it; a font it has is drawn in itself, whatever the alternate. Once the
+/// font is installed it is drawn in itself, not the alternate.
 #[test]
 fn a_missing_font_lays_out_in_the_font_tables_alternate_wherever_it_is_named() {
-    // Measured in Word: a font it doesn't have is drawn in the font table's `w:altName` (when it
-    // has that font) whether a run, the theme (`w:asciiTheme`), the document defaults or a
-    // paragraph style names it; a font it has is drawn in itself, whatever the alternate.
     const TEXT: &str = "illicit little lilies fill tiny jill";
     const FAMILY: &str = "Altfont Sans3";
     let rfonts = |f: &str| format!(r#"<w:rFonts w:ascii="{f}" w:hAnsi="{f}"/>"#);
@@ -270,8 +271,6 @@ fn a_missing_font_lays_out_in_the_font_tables_alternate_wherever_it_is_named() {
         assert!((x("") - cambria).abs() < 0.01, "{place}: no alternate, a roman font is drawn in Cambria");
         assert!((x("Not Installed Either") - cambria).abs() < 0.01, "{place}: an alternate that is missing too counts as none");
     }
-
-    // Once the font is installed it is drawn in itself, not the alternate.
     let mut s = open(&docx_with_font_table(&direct, &entry("JetBrains Mono"), "", "", FAMILY));
     assert!((end_x(&mut s) - mono).abs() < 0.01);
     let data = base64_encode(&renamed("SourceSans3-Regular.ttf", "Source Sans 3", FAMILY));

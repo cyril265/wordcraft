@@ -219,7 +219,7 @@ pub fn layout_equation(
         upem: face.upem.max(1.0) as f32,
         base,
         color,
-        text_font: crate::para::lookup_family(doc, &rc.font).to_string(),
+        text_font: crate::para::lookup_alternate(doc, &rc.font).to_string(),
         nodes: 0,
         path: Vec::new(),
         node_stack: Vec::new(),
@@ -361,7 +361,7 @@ impl Bx {
 }
 
 struct Ctx<'d> {
-    /// The document, for the fonts its font table names (see [`crate::para::lookup_family`]).
+    /// The document, for the fonts its font table names (see [`crate::para::lookup_alternate`]).
     doc: &'d Document,
     face: FaceRef,
     t: Option<Arc<MathTable>>,
@@ -722,7 +722,7 @@ impl Ctx<'_> {
                 .font
                 .as_deref()
                 .filter(|f| !f.eq_ignore_ascii_case("Cambria Math"))
-                .map_or(self.text_font.as_str(), |f| crate::para::lookup_family(self.doc, f));
+                .map_or(self.text_font.as_str(), |f| crate::para::lookup_alternate(self.doc, f));
             let (bold, italic) = match r.sty {
                 Some(MSty::Bold) => (true, false),
                 Some(MSty::Italic) => (false, true),

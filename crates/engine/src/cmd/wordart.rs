@@ -255,7 +255,8 @@ fn transform(s: &mut Session, v: &Value) -> CmdResult {
 }
 
 /// How wide `text` is at `size` points in the document's body font, points: in the font the text
-/// is drawn in ([`wordcraft_layout::para::lookup_family`], a missing font's alternate name).
+/// is drawn in, as the box's paragraph is laid out ([`wordcraft_layout::para::lookup_family`]: a
+/// missing font's alternate name, else Cambria for a missing roman font).
 fn text_width(s: &Session, text: &str, size: f32, bold: bool) -> f32 {
     let family = s.doc.styles.default_chr.font.clone().unwrap_or_else(|| s.doc.settings.minor_font.clone());
     let face = wordcraft_fonts::word::resolve(wordcraft_layout::para::lookup_family(&s.doc, &family), bold, false).face;

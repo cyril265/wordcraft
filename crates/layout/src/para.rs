@@ -64,16 +64,16 @@ impl<'a> SymbolRun<'a> {
 }
 
 /// Whether a bullet level's `text` has a private-use character that no installed font draws:
-/// the font the label is drawn in ([`lookup_family`]: a missing font's alternate name) isn't
-/// installed (or lacks it) and it isn't a symbol-font code with a Unicode equivalent. Private-use
-/// codes mean something different in every font, so another face's glyph there is an unrelated
-/// icon, not a bullet.
+/// its font isn't installed (or lacks it) and it isn't a symbol-font code with a Unicode
+/// equivalent. Private-use codes mean something different in every font, so another face's
+/// glyph there is an unrelated icon, not a bullet. The font is the font table's alternate for a
+/// missing font when there is a usable one ([`lookup_alternate`]), never the roman fallback.
 fn undrawable_bullet(doc: &Document, text: &str, lvl: &Level, rc: &ResolvedChar) -> bool {
     let private = |c: char| matches!(u32::from(c), 0xE000..=0xF8FF | 0xF0000..=0x10FFFF);
     lvl.format == NumFormat::Bullet
         && text.chars().any(|c| {
             private(c) && wordcraft_doc::symbol_fonts::symbol_char(&rc.font, c).is_none() && {
-                let r = wordcraft_fonts::word::resolve(lookup_family(doc, &rc.font), rc.bold, rc.italic);
+                let r = wordcraft_fonts::word::resolve(lookup_alternate(doc, &rc.font), rc.bold, rc.italic);
                 r.substituted || !r.face.covers(c)
             }
         })
@@ -831,9 +831,16 @@ pub fn lookup_family<'f>(doc: &'f Document, font: &'f str) -> &'f str {
     wordcraft_fonts::word::document_family(font, alt, roman, wordcraft_fonts::word::available)
 }
 
-/// The family to look a run's East Asian `font` up as: its alternate name when it isn't
-/// installed (Word draws a missing roman East Asian font in its own East Asian face, not Cambria).
-fn lookup_east_asian_family<'f>(doc: &'f Document, font: &'f str) -> &'f str {
+/// The family to look `font` up as by the font table's alternate name alone: the alternate when
+/// `font` isn't installed and the alternate is ([`wordcraft_fonts::word::document_family`]), else
+/// `font`, never the roman fallback; a symbol font keeps its name. For a run's East Asian font
+/// (Word draws a missing roman East Asian font in its own East Asian face, not Cambria), a
+/// bullet's private-use code, and text outside a paragraph's runs (normal text in equations,
+/// chart and diagram text, watermarks), which never took the roman fallback.
+pub fn lookup_alternate<'f>(doc: &'f Document, font: &'f str) -> &'f str {
+    if wordcraft_doc::symbol_fonts::is_symbol_font(font) {
+        return font;
+    }
     match alt_name(doc, font) {
         Some(alt) => wordcraft_fonts::word::document_family(font, Some(alt), false, wordcraft_fonts::word::available),
         None => font,
@@ -939,7 +946,7 @@ impl<'a> Builder<'a> {
             .font_ea
             .as_ref()
             .filter(|f| !f.eq_ignore_ascii_case(&rc.font) && text.chars().any(east_asian))
-            .map(|f| wordcraft_fonts::word::resolve(lookup_east_asian_family(self.env.doc, f), rc.bold, rc.italic))
+            .map(|f| wordcraft_fonts::word::resolve(lookup_alternate(self.env.doc, f), rc.bold, rc.italic))
             .filter(|r| !r.substituted)
             .map(|r| r.face);
         // The levels by byte of `text`, from `lbase` on.

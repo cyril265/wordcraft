@@ -450,22 +450,18 @@ fn metric_compatible(family: &str) -> &'static [&'static str] {
 ///
 /// Without an alternate name (`alt`) the font is drawn by its name, PostScript names included,
 /// else in [`MISSING_ROMAN_FONT`] when the font table classes it as roman, else by [`resolve`]'s
-/// substitutes. With one, Word draws `family` when it has it here (installed under that name or a
-/// full name, not a PostScript name; or a font with its metrics, see [`metric_compatible`]), else
-/// the alternate when Word has that, else the same fallback. An alternate Word doesn't have counts
-/// as none, and isn't followed further.
+/// substitutes. With one Word has here (installed under that name or a full name, not a
+/// PostScript name; or a font with its metrics, see [`metric_compatible`]), Word draws `family`
+/// when it has it here, else the alternate. An alternate Word doesn't have counts as none: the
+/// font is looked up exactly as without one, and the alternate isn't followed further.
 pub fn document_family<'a>(family: &'a str, alt: Option<&'a str>, roman: bool, has: impl Fn(&str, bool) -> bool) -> &'a str {
-    let Some(alt) = alt else {
-        return if roman && !has(family, true) { MISSING_ROMAN_FONT } else { family };
-    };
     let word_has = |f: &str| has(f, false) || metric_compatible(f).iter().any(|m| has(m, false));
-    if word_has(family) {
-        return family;
+    match alt.filter(|a| word_has(a)) {
+        Some(alt) if !word_has(family) => alt,
+        Some(_) => family,
+        None if roman && !has(family, true) => MISSING_ROMAN_FONT,
+        None => family,
     }
-    if word_has(alt) {
-        return alt;
-    }
-    if roman { MISSING_ROMAN_FONT } else { family }
 }
 
 /// Resolve `family` with bold/italic to a face (memoised until user fonts are added or removed,
@@ -641,14 +637,41 @@ mod tests {
         assert_eq!(substitutes("Cascadia Code").first(), Some(&"Courier New"));
     }
 
+    /// Every font and alternate name of `table`, and `extra`, as the font with each of those names
+    /// Word doesn't have under `has` as its alternate (and an empty one, a missing one and a list),
+    /// classed roman and not: the alternate counts as none, the font is looked up as without one.
+    /// The alternates found unusable.
+    fn an_unusable_alternate_counts_as_none<'a>(
+        table: &[(&'a str, Option<&'a str>, bool, &'a str)],
+        extra: &[&'a str],
+        has: impl Fn(&str, bool) -> bool,
+    ) -> Vec<&'a str> {
+        const MISSING: &str = "Zz Sweep Missing Font";
+        let mut names: Vec<&str> = table.iter().flat_map(|(f, a, _, w)| [Some(*f), *a, Some(*w)]).flatten().collect();
+        names.extend(extra);
+        names.extend(["QqqAlsoMissing", "", "Courier New,Georgia", MISSING]);
+        let unusable: Vec<&str> = names.iter().copied().filter(|a| document_family(MISSING, Some(a), false, &has) == MISSING).collect();
+        for font in &names {
+            for roman in [false, true] {
+                let none = document_family(font, None, roman, &has);
+                for alt in &unusable {
+                    assert_eq!(document_family(font, Some(alt), roman, &has), none, "{font} / {alt:?} / roman {roman}");
+                }
+            }
+        }
+        unusable
+    }
+
+    /// Word for Mac with synthetic documents: (font, altName, the table classes it roman) → the
+    /// font Word draws, with the fonts Word has there. Without a usable alternate Word picks its own
+    /// (Calibri for these); the family is left to `substitutes`, which start with it. An installed
+    /// font named by its PostScript name is drawn in itself without a usable alternate (as
+    /// `resolve` finds it, not in the roman fallback); with one, Word takes the alternate.
     #[test]
     fn a_missing_font_takes_the_font_tables_alternate_as_in_word() {
-        // Word for Mac with synthetic documents: (font, altName, the table classes it roman) → the
-        // font Word draws, with the fonts Word has there. Without a usable alternate Word picks
-        // its own (Calibri for these); the family is left to `substitutes`, which start with it.
         let installed = ["Arial", "Calibri", "Cambria", "Courier New", "Georgia", "Times New Roman"];
         let has = |f: &str| installed.iter().any(|i| i.eq_ignore_ascii_case(f));
-        for (font, alt, roman, word) in [
+        let table = [
             ("HelveticaNeue", Some("Arial"), false, "Arial"),
             ("Helvetica Neue", Some("Courier New"), false, "Courier New"),
             ("DIN-Regular", Some("Calibri"), false, "Calibri"),
@@ -664,25 +687,34 @@ mod tests {
             ("XyzNotInstalled", Some(""), true, "Cambria"),
             ("XyzNotInstalled", None, true, "Cambria"),
             ("XyzNotInstalled", None, false, "XyzNotInstalled"),
-        ] {
+        ];
+        for (font, alt, roman, word) in table {
             assert_eq!(document_family(font, alt, roman, |f, _| has(f)), word, "{font} / {alt:?} / roman {roman}");
         }
-        // An installed font named by its PostScript name is drawn in itself without an alternate
-        // (as `resolve` finds it, not in the roman fallback); with one, Word takes the alternate.
         let postscript = |f: &str, ps: bool| has(f) || (ps && f.eq_ignore_ascii_case("TimesNewRomanPSMT"));
         assert_eq!(document_family("TimesNewRomanPSMT", None, true, postscript), "TimesNewRomanPSMT");
+        assert_eq!(document_family("TimesNewRomanPSMT", Some("Also Not Installed"), true, postscript), "TimesNewRomanPSMT");
         assert_eq!(document_family("TimesNewRomanPSMT", Some("Courier New"), true, postscript), "Courier New");
         assert_eq!(document_family("No Such PostScript Name", None, true, postscript), "Cambria");
+        let unusable = an_unusable_alternate_counts_as_none(&table, &["TimesNewRomanPSMT", "No Such PostScript Name"], postscript);
+        for alt in ["TimesNewRomanPSMT", "Helvetica Neue", "QqqAlsoMissing,Courier New", ""] {
+            assert!(unusable.contains(&alt), "{alt}");
+        }
     }
 
+    /// A Linux server: no Calibri, Cambria, Arial or Times New Roman, their metric-compatible open
+    /// fonts installed. Word has those fonts, so a document's Calibri stays Calibri (drawn in
+    /// Carlito) when the font table gives it a usable alternate, and an alternate naming one is
+    /// taken; generic fallbacks don't count. Without a usable alternate a font is looked up as
+    /// without one: a roman Calibri is drawn in Cambria. Also with an installed alternate that
+    /// isn't one of them (Arial on a Mac without Calibri), and with each metric-compatible font
+    /// installed alone with every other substitute: the font counts as there, and `resolve` draws
+    /// it in that font, not in a generic one tried before it.
     #[test]
     fn fonts_word_ships_count_as_there_through_their_metric_compatible_fonts() {
-        // A Linux server: no Calibri, Cambria, Arial or Times New Roman, their metric-compatible
-        // open fonts installed. Word has those fonts, so a document's Calibri stays Calibri (drawn
-        // in Carlito) and an alternate naming one is taken; generic fallbacks don't count.
         let linux = ["Carlito", "Caladea", "Liberation Sans", "Liberation Serif", "Liberation Mono", "DejaVu Sans", "DejaVu Serif"];
         let has = |f: &str| linux.iter().any(|i| i.eq_ignore_ascii_case(f));
-        for (font, alt, roman, word) in [
+        let table = [
             ("DIN-Regular", Some("Calibri"), false, "Calibri"),
             ("HelveticaNeue", Some("Arial"), false, "Arial"),
             ("Aptos", Some("Calibri"), false, "Calibri"),
@@ -700,14 +732,20 @@ mod tests {
             ("XyzNotInstalled", Some("Helvetica Neue"), false, "XyzNotInstalled"),
             ("XyzNotInstalled", Some("Georgia"), true, "Cambria"),
             ("Palatino Linotype", Some("DejaVu Serif"), true, "DejaVu Serif"),
-        ] {
+        ];
+        for (font, alt, roman, word) in table {
             assert_eq!(document_family(font, alt, roman, |f, _| has(f)), word, "{font} / {alt:?} / roman {roman}");
         }
-        // The same with an installed alternate that isn't one of them (Arial on a Mac without Calibri).
+        assert_eq!(document_family("Calibri", Some("Also Not Installed"), true, |f, _| has(f)), "Cambria");
+        assert_eq!(document_family("Calibri", None, true, |f, _| has(f)), "Cambria");
+        assert_eq!(document_family("Calibri", Some("DejaVu Sans"), true, |f, _| has(f)), "Calibri");
+        let postscript = |f: &str, ps: bool| has(f) || (ps && f.eq_ignore_ascii_case("LiberationSerif"));
+        let unusable = an_unusable_alternate_counts_as_none(&table, &["LiberationSerif", "Calibri", "Book Antiqua"], postscript);
+        for alt in ["Helvetica Neue", "Georgia", "LiberationSerif", "Segoe UI"] {
+            assert!(unusable.contains(&alt), "{alt}");
+        }
         let with_arial = |f: &str| has(f) || f.eq_ignore_ascii_case("Arial");
         assert_eq!(document_family("Calibri", Some("Arial"), false, |f, _| with_arial(f)), "Calibri");
-        // Each metric-compatible font, installed alone with every other substitute: the font counts
-        // as there, and `resolve` draws it in that font, not in a generic one tried before it.
         for font in ["Calibri", "Cambria", "Arial", "Arial CYR", "Times New Roman", "Courier New", "Palatino Linotype", "Book Antiqua"] {
             let base = charset_base_family(font);
             for m in metric_compatible(font) {
