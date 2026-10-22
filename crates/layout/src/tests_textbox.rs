@@ -9,6 +9,10 @@ fn lay(doc: &Document) -> DocLayout {
     layout(doc, &mut c, &LayoutOptions::default())
 }
 
+/// The bundled font the documents of the boxes fitted to their text are set in, so their text's
+/// widths and heights don't depend on the fonts a machine has installed.
+const TEST_FONT: &str = "Source Sans 3";
+
 /// A text box `w` × `h` showing `text`, inline at the end of body paragraph `para`; its story id.
 fn text_box(d: &mut Document, para: usize, text: &str, w: f32, h: f32, body: TextBody) -> u32 {
     let id = d.add_part(PartKind::TextBox, vec![para_block(Paragraph::with_text(text, Default::default()))]);
@@ -245,9 +249,11 @@ fn below_para() -> wordcraft_doc::para::Float {
 }
 
 /// `ZZZ`, `AAA` and `BBB` (`AAA` as `aaa` says) in exact 17 pt lines, `ZZZ` anchoring a text box
-/// `w` × `h` with an outline `stroke` wide showing `paras`, placed as `float`; and its story.
+/// `w` × `h` with an outline `stroke` wide showing `paras`, placed as `float`, in [`TEST_FONT`];
+/// and its story.
 fn anchored(paras: Vec<Paragraph>, (w, h): (f32, f32), stroke: f32, body: TextBody, float: wordcraft_doc::para::Float, aaa: &str) -> (Document, u32) {
     let mut d = Document::new();
+    d.styles.default_chr.font = Some(TEST_FONT.into());
     d.body = vec![para_block(exact("ZZZ", 0.0, 0.0)), para_block(exact(aaa, 0.0, 0.0)), para_block(exact("BBB", 0.0, 0.0))];
     let id = d.add_part(PartKind::TextBox, paras.into_iter().map(para_block).collect());
     d.parts.get_mut(&id).unwrap().body = body;
@@ -479,9 +485,10 @@ fn hostile_sizes_of_boxes_fitted_to_their_text_still_lay_out() {
 /// `k` paragraphs of exact 17 pt lines on an A4 page with Word's synthetic margins (28.35 pt top,
 /// 42.55 pt bottom: the text ends at 799.35), then `ZZZ` anchoring a text box 480 pt wide
 /// stored `h` high, `y` below the paragraph, wrapped as `wrap`, then `AAA` and `BBB`; laid out
-/// in compatibility mode `mode`. The page and frame of the box.
+/// in compatibility mode `mode`, in [`TEST_FONT`]. The page and frame of the box.
 fn near_bottom(k: usize, y: f32, h: f32, wrap: wordcraft_doc::para::Wrap, dist_bottom: f32, body: TextBody, mode: u32) -> (usize, Rect, f32) {
     let mut d = Document::new();
+    d.styles.default_chr.font = Some(TEST_FONT.into());
     d.settings.compat_mode = mode;
     d.last_section.page_w = 595.3;
     d.last_section.page_h = 841.9;
