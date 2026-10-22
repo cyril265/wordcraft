@@ -379,6 +379,69 @@ fn resolve_cache() -> &'static Mutex<Memo> {
 const FAMILY_CACHE_MAX: usize = 4096;
 /// Family names longer than this (bytes) are resolved but never remembered.
 const FAMILY_KEY_MAX: usize = 256;
+/// The font a name stands for when it isn't installed itself: a Windows charset name's font
+/// ([`charset_base_family`]), Symbol for the printer-driver alias `Symbol (PCL6)`.
+fn base_family(family: &str) -> &str {
+    if family.trim().eq_ignore_ascii_case("Symbol (PCL6)") { "Symbol" } else { charset_base_family(family) }
+}
+
+/// Is `family` installed, loaded or embedded in a document, by its family name, an exact full
+/// name (`Arial Bold`) or, when `postscript`, an exact PostScript name (`ArialMT`), or as the font
+/// it stands for ([`base_family`])? With `postscript` this is the lookup [`resolve`] draws a font
+/// by; without, it is what Word's alternate-name rule counts (see [`document_family`]).
+/// Memoised like [`resolve`].
+pub fn available(family: &str, postscript: bool) -> bool {
+    type Memo = (u64, HashMap<(String, bool), bool>);
+    static CACHE: OnceLock<Mutex<Memo>> = OnceLock::new();
+    let cache = CACHE.get_or_init(|| Mutex::new((0, HashMap::new())));
+    let db = FontDb::global();
+    let generation = db.generation();
+    {
+        let mut c = cache.lock().unwrap_or_else(|e| e.into_inner());
+        if c.0 != generation {
+            *c = (generation, HashMap::new());
+        }
+        if let Some(v) = c.1.get(&(family.to_string(), postscript)) {
+            return *v;
+        }
+    }
+    let has = |f: &str| if postscript { db.has_family(f) } else { db.has_family_but_postscript(f) };
+    let base = base_family(family);
+    let v = has(family) || (base != family && has(base));
+    let mut c = cache.lock().unwrap_or_else(|e| e.into_inner());
+    if family.len() <= FAMILY_KEY_MAX && c.0 == generation {
+        if c.1.len() >= FAMILY_CACHE_MAX {
+            c.1.clear();
+        }
+        c.1.insert((family.to_string(), postscript), v);
+    }
+    v
+}
+
+/// Word draws a font it doesn't have in Cambria when the document's font table classes it as
+/// roman (Calibri otherwise, which [`substitutes`] already starts with).
+const MISSING_ROMAN_FONT: &str = "Cambria";
+
+/// The family to look a document's `family` up as, the way Word picks it. `has(name, postscript)`
+/// says whether a font is installed ([`available`]).
+///
+/// Without an alternate name (`alt`) the font is drawn by its name, PostScript names included,
+/// else in [`MISSING_ROMAN_FONT`] when the font table classes it as roman, else by [`resolve`]'s
+/// substitutes. With one, Word draws `family` when it has it (installed under that name or a full
+/// name, not a PostScript name), else the alternate when Word has that, else the same fallback.
+/// An alternate Word doesn't have counts as none, and isn't followed further.
+pub fn document_family<'a>(family: &'a str, alt: Option<&'a str>, roman: bool, has: impl Fn(&str, bool) -> bool) -> &'a str {
+    let Some(alt) = alt else {
+        return if roman && !has(family, true) { MISSING_ROMAN_FONT } else { family };
+    };
+    if has(family, false) {
+        return family;
+    }
+    if has(alt, false) {
+        return alt;
+    }
+    if roman { MISSING_ROMAN_FONT } else { family }
+}
 
 /// Resolve `family` with bold/italic to a face (memoised until user fonts are added or removed,
 /// [`FontDb::generation`]).
@@ -397,8 +460,7 @@ pub fn resolve(family: &str, bold: bool, italic: bool) -> Resolved {
             return *r;
         }
     }
-    // Printer-driver Symbol aliases use the same encoding as Symbol.
-    let base = if family.trim().eq_ignore_ascii_case("Symbol (PCL6)") { "Symbol" } else { charset_base_family(family) };
+    let base = base_family(family);
     let (fam, substituted) = if db.has_family(family) {
         (family.to_string(), false)
     } else if base != family && db.has_family(base) {
@@ -552,6 +614,40 @@ mod tests {
             assert_eq!(&candidates[1..], substitutes("Arial"));
         }
         assert_eq!(substitutes("Cascadia Code").first(), Some(&"Courier New"));
+    }
+
+    #[test]
+    fn a_missing_font_takes_the_font_tables_alternate_as_in_word() {
+        // Word for Mac with synthetic documents: (font, altName, the table classes it roman) → the
+        // font Word draws, with the fonts Word has there. Without a usable alternate Word picks
+        // its own (Calibri for these); the family is left to `substitutes`, which start with it.
+        let installed = ["Arial", "Calibri", "Cambria", "Courier New", "Georgia", "Times New Roman"];
+        let has = |f: &str| installed.iter().any(|i| i.eq_ignore_ascii_case(f));
+        for (font, alt, roman, word) in [
+            ("HelveticaNeue", Some("Arial"), false, "Arial"),
+            ("Helvetica Neue", Some("Courier New"), false, "Courier New"),
+            ("DIN-Regular", Some("Calibri"), false, "Calibri"),
+            ("DIN-Regular", Some("Georgia"), false, "Georgia"),
+            ("XyzNotInstalled", Some("Courier New"), true, "Courier New"),
+            ("XyzNotInstalled", Some("courier new"), false, "courier new"),
+            ("Georgia", Some("Courier New"), true, "Georgia"),
+            ("Times New Roman", Some("Courier New"), true, "Times New Roman"),
+            ("XyzNotInstalled", Some("QqqAlsoMissing"), false, "XyzNotInstalled"),
+            ("XyzNotInstalled", Some("QqqAlsoMissing"), true, "Cambria"),
+            ("XyzNotInstalled", Some("QqqAlsoMissing,Courier New"), false, "XyzNotInstalled"),
+            ("XyzNotInstalled", Some("Courier New,Georgia"), false, "XyzNotInstalled"),
+            ("XyzNotInstalled", Some(""), true, "Cambria"),
+            ("XyzNotInstalled", None, true, "Cambria"),
+            ("XyzNotInstalled", None, false, "XyzNotInstalled"),
+        ] {
+            assert_eq!(document_family(font, alt, roman, |f, _| has(f)), word, "{font} / {alt:?} / roman {roman}");
+        }
+        // An installed font named by its PostScript name is drawn in itself without an alternate
+        // (as `resolve` finds it, not in the roman fallback); with one, Word takes the alternate.
+        let postscript = |f: &str, ps: bool| has(f) || (ps && f.eq_ignore_ascii_case("TimesNewRomanPSMT"));
+        assert_eq!(document_family("TimesNewRomanPSMT", None, true, postscript), "TimesNewRomanPSMT");
+        assert_eq!(document_family("TimesNewRomanPSMT", Some("Courier New"), true, postscript), "Courier New");
+        assert_eq!(document_family("No Such PostScript Name", None, true, postscript), "Cambria");
     }
 
     #[test]

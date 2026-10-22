@@ -141,6 +141,28 @@ fn wordart_is_inserted_styled_and_bent() {
 }
 
 #[test]
+fn a_new_wordart_box_fits_its_text_in_the_font_it_is_drawn_in() {
+    // The body font is missing and the font table names an alternate: the text is drawn in the
+    // alternate, so the box is sized with it too, as wide as with the alternate as the body font.
+    const MISSING: &str = "No Such WordArt Font";
+    let width = |font: &str, alt: Option<&str>| {
+        let mut d = Document::new();
+        d.styles.default_chr.font = Some(font.into());
+        d.settings.font_alt_names = alt.map(|a| vec![(font.to_string(), a.to_string())]).unwrap_or_default();
+        let mut s = Session::new(d);
+        run(&mut s, "insert.wordArt", json!({"text": "illicit"}));
+        let obj = s.doc.para_at(&Pos::body(0, 0)).and_then(|p| p.object_at(0)).cloned();
+        match obj {
+            Some(InlineObject::Shape { w, .. }) => w,
+            other => panic!("no WordArt box: {other:?}"),
+        }
+    };
+    let mono = width("JetBrains Mono", None);
+    assert_eq!(width(MISSING, Some("JetBrains Mono")), mono);
+    assert!((width(MISSING, None) - mono).abs() > 1.0, "the substitute measures differently");
+}
+
+#[test]
 fn wordart_reflection_and_outline_none_options() {
     let mut s = Session::new(Document::new());
     let r = run(&mut s, "insert.wordArt", json!({"text": "Reflect", "style": "solid"}));
