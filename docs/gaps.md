@@ -18,7 +18,7 @@ An otherwise empty section at page start retains its line before continuous cont
 
 Consistent cell widths override stale table grid proportions when their totals agree. Conflicting widths, spans and percentages still need the shared-grid algorithm.
 
-A font that isn't installed is drawn in the font table's alternate name (`w:altName`) when that is installed, as measured in Word. Without a usable alternate Word picks a font of its own that the file doesn't name (Calibri, Cambria, Sylfaen, Arial, Yu Gothic seen); WordCraft keeps its own substitutes there, and RTF's `\falt` isn't read. Details: [layout parity](layout-parity.md).
+A font that isn't installed is drawn in the font table's alternate name (`w:altName`) when that is installed, as measured in Word; a font Word ships counts as installed when its metric-compatible open font is (Carlito, Caladea, Liberation). Without a usable alternate Word picks a font of its own that the file doesn't name (Calibri, Cambria, Sylfaen, Arial, Yu Gothic seen); WordCraft keeps its own substitutes there, and RTF's `\falt` isn't read. Details: [layout parity](layout-parity.md).
 
 Local desktop recovery now covers unsaved drafts and edits to existing files; see
 [recovery.md](recovery.md). This narrows gap #3 but does not resolve the crash/hang reports or

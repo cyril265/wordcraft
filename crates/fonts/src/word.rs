@@ -40,9 +40,9 @@ fn substitutes_by_name(family: &str) -> (&'static [&'static str], bool) {
     const SANS: &[&str] = &["Carlito", "Helvetica Neue", "Arial", "Liberation Sans", "Noto Sans", "DejaVu Sans", "Source Sans 3"];
     const SERIF: &[&str] = &["Caladea", "Times New Roman", "Liberation Serif", "Georgia", "Noto Serif", "DejaVu Serif", "Source Serif 4"];
     const MONO: &[&str] = &["Courier New", "Liberation Mono", "Menlo", "Consolas", "DejaVu Sans Mono", "JetBrains Mono"];
-    const ARIAL: &[&str] = &["Liberation Sans", "Helvetica", "Helvetica Neue", "Arimo", "Source Sans 3"];
-    const ARIAL_UNICODE: &[&str] = &["Arial", "Liberation Sans", "Helvetica", "Helvetica Neue", "Arimo", "Source Sans 3"];
-    const TIMES: &[&str] = &["Liberation Serif", "Times", "Tinos", "Source Serif 4"];
+    const ARIAL: &[&str] = &["Liberation Sans", "Arimo", "Helvetica", "Helvetica Neue", "Source Sans 3"];
+    const ARIAL_UNICODE: &[&str] = &["Arial", "Liberation Sans", "Arimo", "Helvetica", "Helvetica Neue", "Source Sans 3"];
+    const TIMES: &[&str] = &["Liberation Serif", "Tinos", "Times", "Source Serif 4"];
     // Word's symbol fonts (Symbol, Wingdings…) are proprietary: their characters are drawn as their
     // Unicode equivalents (`wordcraft_doc::symbol_fonts`) from these faces or any face that has them.
     const SYMBOL: &[&str] = &["Apple Symbols", "Segoe UI Symbol", "DejaVu Sans", "Noto Sans Symbols", "Noto Sans Symbols 2", "Source Sans 3"];
@@ -343,10 +343,10 @@ fn is_hebrew(f: &str) -> bool {
 /// letters and digits as well as Thai ones (a Thai face without Latin would leave a mixed run in
 /// two fonts, #1549), else the first with Thai letters, else the first installed.
 fn substitute(db: &FontDb, family: &str) -> Option<&'static str> {
-    let mut installed = substitutes(family).iter().copied().filter(|s| db.has_family(s));
     if !is_thai_family(family) {
-        return installed.next();
+        return first_substitute(family, |s| db.has_family(s));
     }
+    let installed = substitutes(family).iter().copied().filter(|s| db.has_family(s));
     let installed: Vec<&'static str> = installed.collect();
     let covers = |name: &str, chars: &[char]| {
         let face = db.face(name, "Regular");
@@ -358,6 +358,11 @@ fn substitute(db: &FontDb, family: &str) -> Option<&'static str> {
         .find(|s| covers(s, &['\u{0E19}', 'A', 'z', '0', '9']))
         .or_else(|| installed.iter().copied().find(|s| covers(s, &['\u{0E19}'])))
         .or_else(|| installed.first().copied())
+}
+
+/// The first of `family`'s [`substitutes`] that `has`.
+fn first_substitute(family: &str, has: impl Fn(&str) -> bool) -> Option<&'static str> {
+    substitutes(family).iter().copied().find(|s| has(s))
 }
 
 fn style_name(bold: bool, italic: bool) -> &'static str {
@@ -422,22 +427,42 @@ pub fn available(family: &str, postscript: bool) -> bool {
 /// roman (Calibri otherwise, which [`substitutes`] already starts with).
 const MISSING_ROMAN_FONT: &str = "Cambria";
 
+/// The open fonts with the same metrics as a font Word ships (Carlito ↔ Calibri, Caladea ↔ Cambria,
+/// Liberation and the Chrome OS fonts ↔ Arial / Times New Roman / Courier New, the Palatino
+/// design and its look-alikes with matching metrics ↔ Palatino Linotype / Book Antiqua), in the
+/// order [`substitutes`] tries them, before any other substitute: a font counted as there through
+/// one of them is drawn in it.
+fn metric_compatible(family: &str) -> &'static [&'static str] {
+    match charset_base_family(family).to_ascii_lowercase().as_str() {
+        "calibri" => &["Carlito"],
+        "cambria" => &["Caladea"],
+        "arial" => &["Liberation Sans", "Arimo"],
+        "times new roman" => &["Liberation Serif", "Tinos"],
+        "courier new" => &["Liberation Mono"],
+        "palatino linotype" => &["Palatino", "Book Antiqua", "TeX Gyre Pagella", "P052", "URW Palladio L", "Palladio"],
+        "book antiqua" => &["Palatino Linotype", "Palatino", "TeX Gyre Pagella", "P052", "URW Palladio L", "Palladio"],
+        _ => &[],
+    }
+}
+
 /// The family to look a document's `family` up as, the way Word picks it. `has(name, postscript)`
 /// says whether a font is installed ([`available`]).
 ///
 /// Without an alternate name (`alt`) the font is drawn by its name, PostScript names included,
 /// else in [`MISSING_ROMAN_FONT`] when the font table classes it as roman, else by [`resolve`]'s
-/// substitutes. With one, Word draws `family` when it has it (installed under that name or a full
-/// name, not a PostScript name), else the alternate when Word has that, else the same fallback.
-/// An alternate Word doesn't have counts as none, and isn't followed further.
+/// substitutes. With one, Word draws `family` when it has it here (installed under that name or a
+/// full name, not a PostScript name; or a font with its metrics, see [`metric_compatible`]), else
+/// the alternate when Word has that, else the same fallback. An alternate Word doesn't have counts
+/// as none, and isn't followed further.
 pub fn document_family<'a>(family: &'a str, alt: Option<&'a str>, roman: bool, has: impl Fn(&str, bool) -> bool) -> &'a str {
     let Some(alt) = alt else {
         return if roman && !has(family, true) { MISSING_ROMAN_FONT } else { family };
     };
-    if has(family, false) {
+    let word_has = |f: &str| has(f, false) || metric_compatible(f).iter().any(|m| has(m, false));
+    if word_has(family) {
         return family;
     }
-    if has(alt, false) {
+    if word_has(alt) {
         return alt;
     }
     if roman { MISSING_ROMAN_FONT } else { family }
@@ -648,6 +673,51 @@ mod tests {
         assert_eq!(document_family("TimesNewRomanPSMT", None, true, postscript), "TimesNewRomanPSMT");
         assert_eq!(document_family("TimesNewRomanPSMT", Some("Courier New"), true, postscript), "Courier New");
         assert_eq!(document_family("No Such PostScript Name", None, true, postscript), "Cambria");
+    }
+
+    #[test]
+    fn fonts_word_ships_count_as_there_through_their_metric_compatible_fonts() {
+        // A Linux server: no Calibri, Cambria, Arial or Times New Roman, their metric-compatible
+        // open fonts installed. Word has those fonts, so a document's Calibri stays Calibri (drawn
+        // in Carlito) and an alternate naming one is taken; generic fallbacks don't count.
+        let linux = ["Carlito", "Caladea", "Liberation Sans", "Liberation Serif", "Liberation Mono", "DejaVu Sans", "DejaVu Serif"];
+        let has = |f: &str| linux.iter().any(|i| i.eq_ignore_ascii_case(f));
+        for (font, alt, roman, word) in [
+            ("DIN-Regular", Some("Calibri"), false, "Calibri"),
+            ("HelveticaNeue", Some("Arial"), false, "Arial"),
+            ("Aptos", Some("Calibri"), false, "Calibri"),
+            ("Liberation Serif", Some("Times New Roman"), true, "Liberation Serif"),
+            ("XyzNotInstalled", Some("courier new"), false, "courier new"),
+            ("Georgia", Some("Times New Roman"), true, "Times New Roman"),
+            ("Calibri", Some("DejaVu Sans"), false, "Calibri"),
+            ("Calibri", Some("Arial"), false, "Calibri"),
+            ("Cambria", Some("DejaVu Serif"), true, "Cambria"),
+            ("Arial CYR", Some("DejaVu Sans"), false, "Arial CYR"),
+            ("Times New Roman", Some("DejaVu Serif"), true, "Times New Roman"),
+            ("Courier New", Some("DejaVu Sans"), false, "Courier New"),
+            ("Segoe UI", Some("Arial"), false, "Arial"),
+            ("Segoe UI", None, false, "Segoe UI"),
+            ("XyzNotInstalled", Some("Helvetica Neue"), false, "XyzNotInstalled"),
+            ("XyzNotInstalled", Some("Georgia"), true, "Cambria"),
+            ("Palatino Linotype", Some("DejaVu Serif"), true, "DejaVu Serif"),
+        ] {
+            assert_eq!(document_family(font, alt, roman, |f, _| has(f)), word, "{font} / {alt:?} / roman {roman}");
+        }
+        // The same with an installed alternate that isn't one of them (Arial on a Mac without Calibri).
+        let with_arial = |f: &str| has(f) || f.eq_ignore_ascii_case("Arial");
+        assert_eq!(document_family("Calibri", Some("Arial"), false, |f, _| with_arial(f)), "Calibri");
+        // Each metric-compatible font, installed alone with every other substitute: the font counts
+        // as there, and `resolve` draws it in that font, not in a generic one tried before it.
+        for font in ["Calibri", "Cambria", "Arial", "Arial CYR", "Times New Roman", "Courier New", "Palatino Linotype", "Book Antiqua"] {
+            let base = charset_base_family(font);
+            for m in metric_compatible(font) {
+                let others = |f: &str| !metric_compatible(font).iter().any(|c| c.eq_ignore_ascii_case(f)) && !f.eq_ignore_ascii_case(base);
+                let has = |f: &str| f.eq_ignore_ascii_case(m) || (substitutes(base).contains(&f) && others(f));
+                assert_eq!(document_family(font, None, false, |f, _| has(f)), font, "{font} through {m}");
+                assert_eq!(document_family("XyzNotInstalled", Some(font), false, |f, _| has(f)), font, "{font} through {m}");
+                assert_eq!(first_substitute(base, has), Some(*m), "{font} is drawn in {m}: {:?}", substitutes(base));
+            }
+        }
     }
 
     #[test]
