@@ -849,18 +849,20 @@ impl Ctx<'_> {
         pl
     }
 
-    /// The list label of `p`, advancing the list counters: call it once per paragraph, in
-    /// document order (only for paragraphs that will show).
-    /// Whether `p` gets a list label ([`Ctx::next_label`] is `Some`), without counting it.
-    fn has_label(&self, p: &Paragraph) -> bool {
+    /// Whether `p` is a list item for the automatic spacing between items: its list shows
+    /// labels. An empty paragraph closing a section counts though it draws no label
+    /// ([`Ctx::next_label`]): Word drops the automatic space after the item before it.
+    fn is_list_item(&self, p: &Paragraph) -> bool {
         p.props
             .numbering
             .or_else(|| self.doc.styles.resolve_para(&p.props).numbering)
             .filter(|n| n.num != 0)
             .is_some_and(|n| self.doc.numbering.shows_label(n.num, n.level))
     }
-    /// The list label of `p`, counted. An empty paragraph closing a section has none and doesn't
-    /// count in its list (Word).
+
+    /// The list label of `p`, advancing the list counters: call it once per paragraph, in
+    /// document order (only for paragraphs that will show). An empty paragraph closing a section
+    /// has none and doesn't count in its list (Word).
     fn next_label(&mut self, p: &Paragraph) -> Option<(String, Level)> {
         if empty_section_mark(p) {
             return None;
@@ -3628,7 +3630,6 @@ fn place_para(ctx: &mut Ctx, pb: &mut PageBuilder, p: &Paragraph, block: usize, 
         if p.section.is_some()
             && p.objects.is_empty()
             && (ctx.opts.show_hidden || !ctx.doc.styles.resolve_char(p.props.style.as_deref(), &p.mark).hidden)
-            && !ctx.has_label(p)
             && (block == 0 || follows_section)
             && pb.at_top()
             && own_page
@@ -3763,7 +3764,7 @@ fn place_para_in_flow(ctx: &mut Ctx, pb: &mut PageBuilder, p: &Paragraph, block:
         }
         // Automatic spacing: none between two list items (as in an HTML list; measured in Word:
         // any two items, of one list or two, at any level).
-        if listed && label.is_some() {
+        if listed && ctx.is_list_item(p) {
             if after_auto {
                 pb.y -= after;
                 after = 0.0;
@@ -4240,7 +4241,7 @@ fn mirror_shift(rp: &wordcraft_doc::resolve::ResolvedPara, number: u32, web: boo
 /// when contextual spacing or automatic spacing between list items drops it before the next
 /// paragraph. Same tests as the spacing between paragraphs in `place_para_in_flow`: contextual
 /// spacing removes this paragraph's space after only when this one asks for it, and the next
-/// counts as a list item when it gets a label.
+/// counts as a list item when its list shows labels ([`Ctx::is_list_item`]).
 fn space_after_kept(ctx: &Ctx, block: usize, rp: &wordcraft_doc::resolve::ResolvedPara, listed: bool) -> f32 {
     let after = rp.space_after.max(0.0);
     if after <= 0.0 {
@@ -4251,7 +4252,7 @@ fn space_after_kept(ctx: &Ctx, block: usize, rp: &wordcraft_doc::resolve::Resolv
         if nrp.style == rp.style && rp.contextual_spacing {
             return 0.0;
         }
-        if listed && rp.after_auto && ctx.has_label(next) {
+        if listed && rp.after_auto && ctx.is_list_item(next) {
             return 0.0;
         }
     }

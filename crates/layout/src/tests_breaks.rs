@@ -213,8 +213,13 @@ fn the_caret_after_a_final_page_break_stays_on_its_page() {
 /// `items` with the blocks at `listed` in one numbered list, laid out: the page count, the
 /// labels drawn with the page each is on, and the top of the last block on its page.
 fn numbered(items: &[Item], next: SectionStart, listed: &[usize]) -> (usize, Vec<(usize, String)>, Option<f32>) {
+    in_list(wordcraft_doc::ListKind::Numbered, items, next, listed)
+}
+
+/// [`numbered`] with a list of `kind`.
+fn in_list(kind: wordcraft_doc::ListKind, items: &[Item], next: SectionStart, listed: &[usize]) -> (usize, Vec<(usize, String)>, Option<f32>) {
     let mut d = doc(items, next);
-    let id = d.numbering.add_list(wordcraft_doc::ListKind::Numbered);
+    let id = d.numbering.add_list(kind);
     for &i in listed {
         d.para_mut(StoryRef::Body, &Path::top(i)).unwrap().props.numbering = Some(wordcraft_doc::props::NumRef { num: id, level: 0 });
     }
@@ -267,4 +272,107 @@ fn an_empty_paragraph_closing_a_section_has_no_list_label() {
     }
     let bbb = |listed: &[usize]| numbered(&[Text("AAA"), Closing(""), Text("BBB")], SectionStart::Continuous, listed).2;
     assert_eq!(bbb(&[0, 1]), bbb(&[0]));
+}
+
+/// An empty paragraph alone in a section starting a new page, closing it before a continuous
+/// section, keeps its line in a list as out of one, and draws no label. Word: `BBB` 21.5 pt
+/// below the top of page 2 after `AAA` (an item or not) and at the top of the document, the
+/// closing paragraph numbered, bulleted or neither; a numbered `BBB` there is `1.`.
+#[test]
+fn an_empty_list_paragraph_alone_in_its_section_keeps_its_line() {
+    for kind in [wordcraft_doc::ListKind::Numbered, wordcraft_doc::ListKind::Bullet] {
+        let after_aaa: &[Item] = &[Closing("AAA"), Closing(""), Text("BBB")];
+        for (aaa, mark) in [(&[0][..], &[0, 1][..]), (&[], &[1])] {
+            let (n, labels, top) = in_list(kind, after_aaa, SectionStart::Continuous, mark);
+            let (plain_n, plain_labels, plain_top) = in_list(kind, after_aaa, SectionStart::Continuous, aaa);
+            assert!(plain_top.is_some_and(|t| t > 0.0), "{kind:?}: an unlisted mark keeps its line: {plain_top:?}");
+            assert_eq!((n, &labels, top), (plain_n, &plain_labels, plain_top), "{kind:?}, AAA listed: {}", !aaa.is_empty());
+        }
+        let first: &[Item] = &[Closing(""), Text("BBB")];
+        for (mark, plain) in [(&[0][..], &[][..]), (&[0, 1], &[1])] {
+            let (n, labels, top) = in_list(kind, first, SectionStart::Continuous, mark);
+            let (plain_n, plain_labels, plain_top) = in_list(kind, first, SectionStart::Continuous, plain);
+            assert!(plain_top.is_some_and(|t| t > 0.0), "{kind:?}: an unlisted mark keeps its line: {plain_top:?}");
+            assert_eq!((n, &labels, top), (plain_n, &plain_labels, plain_top), "{kind:?}, first in the document, BBB listed: {}", plain.len() == 1);
+        }
+    }
+    assert_eq!(numbered(&[Closing(""), Text("BBB")], SectionStart::Continuous, &[0, 1]).1, vec![(0, "1.".to_string())]);
+}
+
+/// `Intro` (with a footnote), `Fill` `before` points below it, list items `AAA` and `AAB` (of
+/// `kind`, automatic space after) and `rest`, the blocks of `rest` at `listed` in their list.
+fn after_items(kind: wordcraft_doc::ListKind, before: f32, rest: &[Item], listed: &[usize], next: SectionStart) -> Document {
+    let mut items = vec![Text("Intro"), Text("Fill"), Text("AAA"), Text("AAB")];
+    items.extend_from_slice(rest);
+    let mut d = doc(&items, next);
+    let id = d.numbering.add_list(kind);
+    let note = d.add_part(wordcraft_doc::PartKind::Footnote, vec![para_block(Paragraph::with_text("Note", Default::default()))]);
+    d.insert_object(
+        &Pos::body(0, 5),
+        InlineObject::NoteRef { kind: wordcraft_doc::para::NoteKind::Footnote, id: note, custom: String::new() },
+        &Default::default(),
+    )
+    .unwrap();
+    d.para_mut(StoryRef::Body, &Path::top(1)).unwrap().props.space_before = Some(before);
+    for i in [2, 3] {
+        let p = d.para_mut(StoryRef::Body, &Path::top(i)).unwrap();
+        p.props.numbering = Some(wordcraft_doc::props::NumRef { num: id, level: 0 });
+        p.props.space_after_auto = Some(true);
+    }
+    for &i in listed {
+        d.para_mut(StoryRef::Body, &Path::top(4 + i)).unwrap().props.numbering = Some(wordcraft_doc::props::NumRef { num: id, level: 0 });
+    }
+    d
+}
+
+/// On a page with a footnote, a list item's last line keeps its automatic space after (14 pt)
+/// clear of the separator, unless the next paragraph is a list item. Word, moving `Fill` down
+/// in 5 pt steps: `AAB` goes to page 2 at 650 pt before a numbered `CCC` and before an empty
+/// numbered or bulleted paragraph closing a section (next one new page or continuous), at
+/// 635 pt before a plain `CCC` or an empty unnumbered closing paragraph.
+#[test]
+fn an_empty_list_paragraph_closing_a_section_is_an_item_for_the_space_after_the_item_before() {
+    let moves_at = |build: &dyn Fn(f32) -> Document| {
+        let on_page_1 = |x: u32| pages(&build(x as f32)).1.get(3).copied().flatten() == Some(1);
+        let (mut lo, mut hi) = (0u32, 800u32);
+        assert!(on_page_1(lo) && !on_page_1(hi));
+        while hi - lo > 1 {
+            let mid = (lo + hi) / 2;
+            if on_page_1(mid) { lo = mid } else { hi = mid }
+        }
+        hi
+    };
+    for kind in [wordcraft_doc::ListKind::Numbered, wordcraft_doc::ListKind::Bullet] {
+        let next = SectionStart::NextPage;
+        let item = moves_at(&|x| after_items(kind, x, &[Text("CCC")], &[0], next));
+        let text = moves_at(&|x| after_items(kind, x, &[Text("CCC")], &[], next));
+        assert!((item as f32 - text as f32 - wordcraft_doc::resolve::AUTO_SPACING).abs() <= 1.0, "{kind:?}: {item} and {text}");
+        for next in [SectionStart::NextPage, SectionStart::Continuous] {
+            let mark = moves_at(&|x| after_items(kind, x, &[Closing(""), Text("CCC")], &[0], next));
+            let plain = moves_at(&|x| after_items(kind, x, &[Closing(""), Text("CCC")], &[], next));
+            assert_eq!((mark, plain), (item, text), "{kind:?}, {next:?}");
+        }
+    }
+}
+
+/// Word drops the item's automatic space after before an empty numbered or bulleted paragraph
+/// closing a section as before another item: before a continuous section `BBB` comes 13.8 pt
+/// (one line) below `AAB` after such a paragraph, 27.8 pt after an unnumbered one. The
+/// closing paragraph sits where a list item would; unnumbered, where a plain paragraph would.
+#[test]
+fn an_empty_list_paragraph_closing_a_section_drops_the_automatic_space_after_the_item_before() {
+    for kind in [wordcraft_doc::ListKind::Numbered, wordcraft_doc::ListKind::Bullet] {
+        for next in [SectionStart::NextPage, SectionStart::Continuous] {
+            let top = |rest: &[Item], listed: &[usize]| {
+                let l = lay(&after_items(kind, 0.0, rest, listed, next));
+                let (aab, it) = (l.caret(&Pos::body(3, 0)).unwrap(), l.caret(&Pos::body(4, 0)).unwrap());
+                assert_eq!((aab.page, it.page), (0, 0));
+                it.top - aab.top
+            };
+            let (mark, item) = (top(&[Closing(""), Text("BBB")], &[0]), top(&[Text("CCC"), Text("BBB")], &[0]));
+            let (plain, text) = (top(&[Closing(""), Text("BBB")], &[]), top(&[Text("CCC"), Text("BBB")], &[]));
+            assert!((mark - item).abs() < 0.01 && (plain - text).abs() < 0.01, "{kind:?}, {next:?}: {mark} {item}, {plain} {text}");
+            assert!((text - item - wordcraft_doc::resolve::AUTO_SPACING).abs() < 0.01, "{kind:?}, {next:?}: {text} {item}");
+        }
+    }
 }
