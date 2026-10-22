@@ -3945,7 +3945,9 @@ fn square_wrap_flows_text_on_both_sides() {
 /// #1376: in a row split by a square-wrapped object (text on both sides), a word too long for a
 /// strip moves on whole (to the row's next strip, or the next row) instead of being split across
 /// it, however long it is; words that fit still use it. A strip that is the row's only span takes
-/// the word split across it, as a line with no object does (Word for Mac).
+/// the word split across it, as a line with no object does (Word for Mac). In
+/// [`WRAP_TEST_FONT`], whose words fit the wider strips and need splitting in the 32 pt one,
+/// whatever fonts are installed.
 #[test]
 fn a_word_too_wide_for_a_strip_beside_a_float_moves_on_whole_only_in_a_split_row() {
     use wordcraft_doc::para::{Anchor, Float, ShapeKind, Wrap};
@@ -3953,6 +3955,7 @@ fn a_word_too_wide_for_a_strip_beside_a_float_moves_on_whole_only_in_a_split_row
     // line: (top, left, beside the object's far side, ends inside a word, where its text ends).
     let lines = |text: &str, x: f32, w: f32| {
         let mut d = Document::from_text(&text.repeat(6));
+        d.styles.default_chr.font = Some(WRAP_TEST_FONT.into());
         let float = Float { wrap: Wrap::Square, h_rel: Anchor::Column, v_rel: Anchor::Paragraph, x, ..Default::default() };
         let shape = InlineObject::Shape {
             kind: ShapeKind::Rectangle,
