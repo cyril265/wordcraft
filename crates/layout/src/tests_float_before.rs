@@ -118,6 +118,22 @@ fn clear_of(l: &DocLayout, page: usize, r: &Rect) -> bool {
     })
 }
 
+/// Every body line's text on page `page` (its own ascent and descent about the baseline, without
+/// the extra of multiple line spacing) clear of `r`.
+fn text_clear_of(l: &DocLayout, page: usize, r: &Rect) -> bool {
+    l.pages[page].items.iter().all(|it| match it {
+        Placed::Lines { story: StoryRef::Body, path, para, l0, l1, x, y, .. } if path.0.len() == 1 => {
+            let shown = para.lines.get(*l0..*l1).unwrap_or(&[]);
+            let first = shown.first().map_or(0.0, |l| l.top);
+            shown.iter().all(|line| {
+                let top = y + line.baseline - line.text_asc - first;
+                !Rect::new(x + line.left, top + 0.01, line.right - line.left, line.text_asc + line.text_desc - 0.02).intersects(r)
+            })
+        }
+        _ => true,
+    })
+}
+
 #[test]
 fn a_paragraph_before_a_floating_table_over_it_moves_below_it() {
     // Word: `ZZZ`, a full-width table placed on the page 23.3pt down over it, `AAA`: ZZZ goes
@@ -150,16 +166,78 @@ fn a_paragraph_before_a_floating_table_lower_down_stays_above_it() {
 #[test]
 fn of_the_paragraphs_before_a_floating_table_those_in_its_way_move_below_it() {
     // Word: eight paragraphs, then a table 100pt down: the first stay above it, the rest go below
-    // it in order.
+    // it in order. A line the table's top lands on anywhere moves below it: its 17pt (exactly or
+    // at least) are in the way, however short the font's own line (the default font's or a
+    // bundled one's; see the next test for Word's measurements).
+    use wordcraft_doc::props::LineSpacing;
     let text_8 = (1..=8).map(|i| format!("Paragraph {i}")).collect::<Vec<_>>().join("\n") + "\nAfter";
-    for y in [120.0, 160.0] {
-        let l = lay(&doc_with_table(&text_8, 8, float_table(612.0, 100.0, on_page(y))));
-        let table = table_rect(&l, 0, 8).unwrap();
-        let boxes: Vec<(f32, f32, f32)> = (0..8).chain(9..10).map(|b| lines(&l, 0, b).unwrap()).collect();
-        assert!((boxes[0].0 - 72.0).abs() < 0.5, "y {y}: the first paragraph stays at the top: {boxes:?}");
-        assert!(boxes.windows(2).all(|w| w[1].0 >= w[0].1 - 0.01), "y {y}: in order: {boxes:?}");
-        assert!(boxes.iter().all(|(t, b, _)| *b <= table.y + 0.01 || *t >= table.bottom() - 0.01), "y {y}: {boxes:?} around {table:?}");
-        assert!(boxes.iter().any(|(t, ..)| *t >= table.bottom() - 0.01), "y {y}: some below: {boxes:?}");
+    for font in [None, Some("Source Sans 3")] {
+        for spacing in [LineSpacing::Exactly(17.0), LineSpacing::AtLeast(17.0)] {
+            for y in (0..17).map(|k| 106.5 + k as f32).chain([160.0]) {
+                let mut d = doc_with_table(&text_8, 8, float_table(612.0, 100.0, on_page(y)));
+                d.styles.default_chr.font = font.map(Into::into);
+                for b in &mut d.body {
+                    if let Block::Para(p) = Arc::make_mut(b) {
+                        p.props.line_spacing = Some(spacing);
+                    }
+                }
+                let l = lay(&d);
+                let table = table_rect(&l, 0, 8).unwrap();
+                let boxes: Vec<(f32, f32, f32)> = (0..8).chain(9..10).map(|b| lines(&l, 0, b).unwrap()).collect();
+                let case = format!("{font:?} {spacing:?} y {y}");
+                assert!((boxes[0].0 - 72.0).abs() < 0.5, "{case}: the first paragraph stays at the top: {boxes:?}");
+                assert!(boxes.windows(2).all(|w| w[1].0 >= w[0].1 - 0.01), "{case}: in order: {boxes:?}");
+                assert!(boxes.iter().all(|(t, b, _)| *b <= table.y + 0.01 || *t >= table.bottom() - 0.01), "{case}: {boxes:?} around {table:?}");
+                assert!(boxes.iter().any(|(t, ..)| *t >= table.bottom() - 0.01), "{case}: some below: {boxes:?}");
+            }
+        }
+    }
+}
+
+#[test]
+fn exact_and_at_least_lines_keep_their_whole_height_clear_of_a_float_before_or_after_its_anchor() {
+    // Word (Calibri 11 pt, whose own line is 13.4 pt, in exact or at-least 17 pt lines): a
+    // full-width table or square-wrapped shape whose top lands anywhere in the third line, 106 to
+    // 123 pt, moves that line below it, also 16.5 pt into it; a shape at 123 leaves it in place.
+    // The same whether the float comes after the line in the document (a table after it, a shape
+    // anchored in a later paragraph) or before it.
+    use wordcraft_doc::props::LineSpacing;
+    let text_8 = (1..=8).map(|i| format!("P{i} word")).collect::<Vec<_>>().join("\n");
+    let square = |y: f32| Float { wrap: Wrap::Square, h_rel: Anchor::Page, v_rel: Anchor::Page, y, ..Default::default() };
+    for font in [None, Some("Source Sans 3")] {
+        for spacing in [LineSpacing::Exactly(17.0), LineSpacing::AtLeast(17.0)] {
+            for float_first in [false, true] {
+                for table in [true, false] {
+                    for y in (0..17).map(|k| 106.5 + k as f32).chain([123.0]) {
+                        if table && y >= 123.0 {
+                            continue;
+                        }
+                        let mut d = match (table, float_first) {
+                            (true, first) => doc_with_table(&text_8, if first { 0 } else { 5 }, float_table(612.0, 50.0, on_page(y))),
+                            (false, first) => doc_with_shape(&text_8, if first { 0 } else { 5 }, 612.0, 50.0, square(y)),
+                        };
+                        d.styles.default_chr.font = font.map(Into::into);
+                        for b in &mut d.body {
+                            if let Block::Para(p) = Arc::make_mut(b) {
+                                p.props.line_spacing = Some(spacing);
+                            }
+                        }
+                        let l = lay(&d);
+                        let float =
+                            if table { table_rect(&l, 0, if float_first { 0 } else { 5 }) } else { shapes(&l.pages[0].items).first().copied() };
+                        let case = format!("{font:?} {spacing:?} float first {float_first}, table {table}, y {y}");
+                        let float = float.unwrap_or_else(|| panic!("{case}: no float"));
+                        assert!((float.y - y).abs() < 0.01, "{case}: the float stays put: {float:?}");
+                        let third = lines(&l, 0, if table && float_first { 3 } else { 2 }).unwrap();
+                        if y < 123.0 {
+                            assert!(third.0 >= float.bottom() - 0.01, "{case}: the third line at {third:?}, the float ends at {}", float.bottom());
+                        } else {
+                            assert!((third.0 - 106.0).abs() < 0.01, "{case}: the third line stays at {third:?}");
+                        }
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -324,7 +402,8 @@ fn text_before_floating_tables_never_overlaps_them_nor_gets_lost() {
                 let mut text: Vec<String> =
                     (0..n).map(|i| format!("Paragraph {i} before the table, long enough to run over a line or two when it is narrowed.")).collect();
                 text.push("After".into());
-                // (Automatic line spacing: a line is as tall as checked against the table.)
+                // (Automatic line spacing, 1.15 lines: in Word 2013 layout a line keeps its text clear of
+                // the table, its extra spacing may run over it.)
                 let mut d = Document::from_text(&text.join("\n"));
                 d.insert_block(
                     StoryRef::Body,
@@ -344,7 +423,7 @@ fn text_before_floating_tables_never_overlaps_them_nor_gets_lost() {
                     panic!("y {y}, {n}: no table")
                 };
                 if l.pages.len() == 1 {
-                    assert!(clear_of(&l, page, &table), "y {y}, {n} before, {w} wide: text over {table:?}");
+                    assert!(text_clear_of(&l, page, &table), "y {y}, {n} before, {w} wide: text over {table:?}");
                 }
             }
         }
