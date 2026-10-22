@@ -1155,6 +1155,9 @@ impl Reader<'_> {
         if !alt.is_empty() {
             obj.set_alt_text(&alt);
         }
+        if let InlineObject::Group { picture_fill, canvas: None, .. } = &mut obj {
+            *picture_fill = picture_fill_mark(c.child("wp:docPr"));
+        }
         self.set_shape_id(&mut obj, c.child("wp:docPr").and_then(|p| p.attr("id")));
         // Word's effect extent also covers a rotated object's overhang; the model keeps that
         // apart (it follows from the angle), so take it back out.
@@ -1337,7 +1340,7 @@ impl Reader<'_> {
         if children.is_empty() {
             return None;
         }
-        Some(InlineObject::Group { w, h, float, ch_w, ch_h, children, canvas: None })
+        Some(InlineObject::Group { w, h, float, ch_w, ch_h, children, canvas: None, picture_fill: false })
     }
 
     /// A `wpc:wpc` Drawing Canvas (`w` × `h`, ECMA-376 Part 1 §20.4 and the Word 2010 canvas
@@ -1359,7 +1362,7 @@ impl Reader<'_> {
         };
         let mut children = Vec::new();
         self.group_members(sc, c, rels, (0.0, 0.0, 1.0, 1.0), 0, &mut children);
-        InlineObject::Group { w, h, float, ch_w: w.max(1.0), ch_h: h.max(1.0), children, canvas: Some(style) }
+        InlineObject::Group { w, h, float, ch_w: w.max(1.0), ch_h: h.max(1.0), children, canvas: Some(style), picture_fill: false }
     }
 
     /// The members of group `g` into `out`, mapped into the outermost group's space by `t`
@@ -1640,7 +1643,7 @@ impl Reader<'_> {
         if children.is_empty() {
             return None;
         }
-        Some(InlineObject::Group { w, h, float, ch_w, ch_h, children, canvas: None })
+        Some(InlineObject::Group { w, h, float, ch_w, ch_h, children, canvas: None, picture_fill: false })
     }
 
     /// The members of VML group `g` into `out`, mapped into the outermost group's space by `t`
@@ -1730,7 +1733,7 @@ impl Reader<'_> {
             return picture;
         }
         let children = layers.into_iter().map(|(x, y, obj)| wordcraft_doc::para::GroupChild { x, y, obj }).collect();
-        InlineObject::Group { w, h, float, ch_w: w, ch_h: h, children, canvas: None }
+        InlineObject::Group { w, h, float, ch_w: w, ch_h: h, children, canvas: None, picture_fill: true }
     }
 
     /// One legacy VML picture, text box, line, rectangle, oval or preset shape (best effort).
@@ -2100,6 +2103,13 @@ fn nv_alt(p: Option<&El>) -> (String, AltText) {
         .flat_map(|x| x.els())
         .any(|d| d.local() == "decorative" && on_off_attr(d, "val"));
     (descr, AltText { text: String::new(), title, decorative })
+}
+
+/// Whether a group's `wp:docPr` carries our mark of a VML shape filled with a picture: an
+/// `a:ext` of URI [`crate::PICTURE_FILL_EXT`] in its `a:extLst` (names and descriptions play no
+/// part).
+fn picture_fill_mark(p: Option<&El>) -> bool {
+    p.and_then(|p| p.child("a:extLst")).is_some_and(|l| l.children("a:ext").any(|x| x.attr("uri") == Some(crate::PICTURE_FILL_EXT)))
 }
 
 fn anchor_float(c: &El) -> Float {

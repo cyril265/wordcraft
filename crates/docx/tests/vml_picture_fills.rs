@@ -128,6 +128,115 @@ fn part_text(d: &Document, o: &InlineObject) -> Vec<String> {
     o.text_boxes().iter().flat_map(|id| d.parts[id].blocks.iter().filter_map(|b| b.as_para()).map(|p| p.text.clone())).collect()
 }
 
+/// Whether `o` is a group read from a shape filled with a picture.
+fn picture_fill(o: &InlineObject) -> Option<bool> {
+    match o {
+        InlineObject::Group { picture_fill, .. } => Some(*picture_fill),
+        _ => None,
+    }
+}
+
+/// `document.xml` of a saved `d`.
+fn written(d: &Document) -> String {
+    let bytes = wordcraft_docx::write(d).unwrap();
+    let mut zip = zip::ZipArchive::new(std::io::Cursor::new(bytes)).unwrap();
+    std::io::read_to_string(zip.by_name("word/document.xml").unwrap()).unwrap()
+}
+
+/// Our mark of a group read from a shape filled with a picture, as written: the only extension
+/// of its `wp:docPr`.
+const MARK: &str =
+    r#"><a:extLst><a:ext uri="urn:wordcraft:picture-fill"><wcpf:pictureFill xmlns:wcpf="urn:wordcraft:picture-fill"/></a:ext></a:extLst></wp:docPr>"#;
+
+/// Only the group made for a shape filled with a picture is marked as one, with the fill colour
+/// under the picture or not; a `v:group` holding such a shape isn't. Saved, the mark is an
+/// extension of the group's `wp:docPr` (the file is otherwise what it is unmarked, the drawing's
+/// name and description included) and read back the same.
+#[test]
+fn only_the_group_read_from_a_picture_fill_is_marked() {
+    let member = format!(
+        r##"<v:shape type="#_x0000_t202" style="position:absolute;left:0;top:0;width:200;height:100" fillcolor="#00ffff">{FRAME}<v:textbox><w:txbxContent><w:p><w:r><w:t>GRPTEXT</w:t></w:r></w:p></w:txbxContent></v:textbox></v:shape>"##
+    );
+    let group = format!(
+        r#"{TEXT_BOX_TYPE}<v:group style="position:absolute;margin-left:100pt;margin-top:100pt;width:200pt;height:100pt" coordorigin="0,0" coordsize="200,100">{member}</v:group>"#
+    );
+    let body = [
+        text_box(PAGE, "", "boxed"),
+        text_box(PAGE, r##"fillcolor="#00ffff""##, "clear"),
+        rect(PAGE, r##"fillcolor="#00ffff""##, FRAME),
+        para(&group),
+    ]
+    .concat();
+    for (picture, clear) in [(opaque(), false), (see_through(), true)] {
+        let d = read(&body, &picture);
+        let ps = paras(&d);
+        let marks: Vec<_> = ps.iter().map(|p| picture_fill(&p.objects[0])).collect();
+        assert_eq!(marks, [Some(true), Some(true), Some(true), Some(false)], "clear {clear}");
+        let under = layers(&ps[1].objects[0]).and_then(|(_, _, l)| l.first().cloned());
+        let want = if clear { Layer::Shape(ShapeKind::Rectangle, solid(CYAN), None, false) } else { Layer::Picture(0.0, 0.0, 200.0, 100.0, 0.0) };
+        assert_eq!(under, Some(want), "clear {clear}: the first member");
+        let again = saved(&d);
+        let back: Vec<_> = paras(&again).iter().map(|p| picture_fill(&p.objects[0])).collect();
+        assert_eq!(back, marks, "clear {clear}: saved");
+        for (i, (back, p)) in paras(&again).iter().zip(&ps).enumerate() {
+            assert_eq!(layers(&back.objects[0]), layers(&p.objects[0]), "clear {clear}: {i} saved");
+        }
+        let xml = written(&d);
+        assert_eq!(xml.matches(MARK).count(), 3, "clear {clear}: {xml}");
+        assert_eq!(xml.matches("urn:wordcraft:picture-fill").count(), 6, "clear {clear}");
+        let mut plain = d.clone();
+        for b in &mut plain.body {
+            if let wordcraft_doc::Block::Para(p) = std::sync::Arc::make_mut(b) {
+                for o in &mut p.objects {
+                    if let InlineObject::Group { picture_fill, .. } = o {
+                        *picture_fill = false;
+                    }
+                }
+            }
+        }
+        assert_eq!(xml.replace(MARK, "/>"), written(&plain), "clear {clear}: written as unmarked but for the mark");
+        assert_eq!(written(&again), xml, "clear {clear}: saved again");
+    }
+}
+
+/// The mark is read where a file saved again elsewhere may have it: the drawing in
+/// `mc:AlternateContent`, the mark after another extension of its `wp:docPr` (the decorative mark,
+/// kept too), its element with a namespace declaration of its own.
+#[test]
+fn the_mark_is_read_beside_other_extensions_in_alternate_content() {
+    let d = read(&text_box(PAGE, "", "boxed"), &opaque());
+    let mut zip = zip::ZipArchive::new(std::io::Cursor::new(wordcraft_docx::write(&d).unwrap())).unwrap();
+    let mut out = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+    for i in 0..zip.len() {
+        let mut part = zip.by_index(i).unwrap();
+        let name = part.name().to_string();
+        let mut bytes = Vec::new();
+        std::io::Read::read_to_end(&mut part, &mut bytes).unwrap();
+        if name == "word/document.xml" {
+            let xml = String::from_utf8(bytes).unwrap();
+            assert_eq!(xml.matches(MARK).count(), 1, "{xml}");
+            let decorative = r#"<a:ext uri="{C183D7F6-B498-43B3-948B-1728B52AA6E4}"><adec:decorative xmlns:adec="http://schemas.microsoft.com/office/drawing/2017/decorative" val="1"/></a:ext>"#;
+            let xml = xml
+                .replacen("<w:drawing>", r#"<mc:AlternateContent><mc:Choice Requires="wpg"><w:drawing>"#, 1)
+                .replacen("</w:drawing>", "</w:drawing></mc:Choice><mc:Fallback><w:pict/></mc:Fallback></mc:AlternateContent>", 1)
+                .replace(
+                    "<a:extLst><a:ext uri=\"urn:wordcraft:picture-fill\">",
+                    &format!("<a:extLst>{decorative}<a:ext uri=\"urn:wordcraft:picture-fill\">"),
+                )
+                .replace(r#"xmlns:wcpf="urn:wordcraft:picture-fill"/>"#, r#"xmlns:wcpf="urn:wordcraft:picture-fill" xmlns=""/>"#);
+            assert!(xml.contains(r#"<mc:Choice Requires="wpg"><w:drawing>"#) && xml.contains(&format!("<a:extLst>{decorative}<a:ext")), "{xml}");
+            bytes = xml.into_bytes();
+        }
+        out.start_file(name, zip::write::SimpleFileOptions::default()).unwrap();
+        std::io::Write::write_all(&mut out, &bytes).unwrap();
+    }
+    let again = wordcraft_docx::read(&out.finish().unwrap().into_inner()).unwrap();
+    let o = &paras(&again)[0].objects[0];
+    assert_eq!(picture_fill(o), Some(true), "{o:?}");
+    assert!(o.is_decorative());
+    assert_eq!(part_text(&again, o), ["boxed"]);
+}
+
 /// Word draws the picture stretched over the shape's box, the outline and text over it, and only
 /// when the fill has an `o:title`; tiles, patterns, a fill without a type, a shape that isn't
 /// filled, a rounded rectangle, a half-transparent fill, a kept aspect, a missing picture and a

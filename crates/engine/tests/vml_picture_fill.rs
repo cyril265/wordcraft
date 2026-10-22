@@ -6,15 +6,15 @@
 
 use std::io::Write;
 
-use wordcraft_doc::StoryRef;
 use wordcraft_doc::fill::Fill;
 use wordcraft_doc::para::ShapeKind;
 use wordcraft_doc::props::Rgb;
+use wordcraft_doc::{InlineObject, StoryRef};
 use wordcraft_engine::Session;
 use wordcraft_engine::layout::Placed;
 use wordcraft_geom::Rect;
 
-const NS: &str = r#"xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:v="urn:schemas-microsoft-com:vml" xmlns:o="urn:schemas-microsoft-com:office:office""#;
+const NS: &str = r#"xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:v="urn:schemas-microsoft-com:vml" xmlns:o="urn:schemas-microsoft-com:office:office" xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture" xmlns:wpg="http://schemas.microsoft.com/office/word/2010/wordprocessingGroup" xmlns:wps="http://schemas.microsoft.com/office/word/2010/wordprocessingShape""#;
 const PAGE: &str = "mso-position-horizontal-relative:page;mso-position-vertical-relative:page";
 const REL: &str = "http://schemas.openxmlformats.org/officeDocument/2006/relationships";
 const CYAN: Rgb = Rgb(0, 0xFF, 0xFF);
@@ -270,27 +270,177 @@ fn group_members_filled_with_a_picture_are_where_word_draws_them() {
 }
 
 /// A text box filled with a picture is edited like any text box: a click inside it goes into its
-/// text, one on its border takes the box, in the body and in a header.
+/// text, one on its border takes the box, in the body and in a header; also over a picture that
+/// may be transparent, where the box's fill colour comes first in the group.
 #[test]
 fn clicking_inside_a_text_box_filled_with_a_picture_edits_its_text() {
     let style = "margin-left:100pt;margin-top:100pt;width:200pt;height:100pt";
-    let shape = text_box(style, "", "TEXTINBOX");
-    let mut s = open(&(para("ANCHOR", &shape) + &para("END", "")));
+    for (picture, attrs) in [(png(2), ""), (png(6), r##"fillcolor="#00ffff""##)] {
+        let shape = text_box(style, attrs, "TEXTINBOX");
+        let mut s = open_with(&(para("ANCHOR", &shape) + &para("END", "")), None, &picture);
+        assert_eq!(first_member(&s), if attrs.is_empty() { None } else { solid(CYAN) }, "{attrs}: the fill colour first");
+        clicked_into(&mut s, false, attrs);
+        let mut s = open_with(&para("BODY", ""), Some(&para("HEADER", &shape)), &picture);
+        clicked_into(&mut s, true, attrs);
+    }
+}
+
+/// A click inside the text box at 100, 100, 200 × 100 pt on page 1, in the body or in the header
+/// `in_header`, goes into its text (`TEXTINBOX`); one on its border takes the box.
+fn clicked_into(s: &mut Session, in_header: bool, what: &str) {
     let l = s.layout();
     let text = |id: u32| s.doc.plain_text(StoryRef::Part(id));
-    let Some(StoryRef::Part(id)) = l.story_at(0, 120.0, 110.0) else { panic!("{:?}", l.story_at(0, 120.0, 110.0)) };
-    assert_eq!(text(id), "TEXTINBOX");
-    assert!(l.object_at(0, 120.0, 110.0, 3.0).is_none(), "inside: the text");
-    let edge = l.object_at(0, 100.5, 150.0, 3.0).expect("on the border: the box");
-    assert_eq!(edge.rect, Rect::new(100.0, 100.0, 200.0, 100.0));
-    assert_eq!(edge.text_box, Some(id));
-    let mut s = open_with(&para("BODY", ""), Some(&para("HEADER", &shape)), &png(2));
+    let (id, story) = if in_header {
+        let head = StoryRef::Part(l.pages[0].header_story.expect("a header"));
+        let Some(id) = l.header_footer_text_box_at(0, 120.0, 110.0) else { panic!("{what}: no text box in the header") };
+        (id, head)
+    } else {
+        let Some(StoryRef::Part(id)) = l.story_at(0, 120.0, 110.0) else { panic!("{what}: {:?}", l.story_at(0, 120.0, 110.0)) };
+        (id, StoryRef::Body)
+    };
+    assert_eq!(text(id), "TEXTINBOX", "{what}");
+    assert!(l.object_at_in(0, 120.0, 110.0, 3.0, story).is_none(), "{what}: inside: the text");
+    let edge = l.object_at_in(0, 100.5, 150.0, 3.0, story).unwrap_or_else(|| panic!("{what}: on the border: the box"));
+    assert_eq!((edge.rect, edge.text_box), (Rect::new(100.0, 100.0, 200.0, 100.0), Some(id)), "{what}: on the border: the box");
+}
+
+/// The fill of the first member of the first group in the body, when that member is a shape.
+fn first_member(s: &Session) -> Option<Fill> {
+    groups(s).into_iter().find_map(|o| match o {
+        InlineObject::Group { children, .. } => children.first().and_then(|c| match &c.obj {
+            InlineObject::Shape { fill, .. } => fill.clone(),
+            _ => None,
+        }),
+        _ => None,
+    })
+}
+
+/// The groups in the body's paragraphs, in order.
+fn groups(s: &Session) -> Vec<&InlineObject> {
+    s.doc.body.iter().filter_map(|b| b.as_para()).flat_map(|p| &p.objects).filter(|o| matches!(o, InlineObject::Group { .. })).collect()
+}
+
+/// Whether each group in the body was read from a shape filled with a picture.
+fn picture_fills(s: &Session) -> Vec<bool> {
+    groups(s).into_iter().map(|o| matches!(o, InlineObject::Group { picture_fill: true, .. })).collect()
+}
+
+/// A DrawingML group (`wpg:wgp`) on the page at 100, 100, 200 × 100 pt: a picture and a text box
+/// over it, each filling the group.
+fn drawing_group(text: &str) -> String {
+    named_group(text, r#"name="Group 1""#, "")
+}
+
+/// [`drawing_group`] with `doc_pr` as its `wp:docPr` attributes and `ext` in it.
+fn named_group(text: &str, doc_pr: &str, ext: &str) -> String {
+    let xfrm = r#"<a:xfrm><a:off x="0" y="0"/><a:ext cx="2540000" cy="1270000"/></a:xfrm>"#;
+    format!(
+        r#"<w:r><w:drawing><wp:anchor behindDoc="0" distT="0" distB="0" distL="0" distR="0" simplePos="0" relativeHeight="2" locked="0" layoutInCell="1" allowOverlap="1"><wp:simplePos x="0" y="0"/><wp:positionH relativeFrom="page"><wp:posOffset>1270000</wp:posOffset></wp:positionH><wp:positionV relativeFrom="page"><wp:posOffset>1270000</wp:posOffset></wp:positionV><wp:extent cx="2540000" cy="1270000"/><wp:effectExtent l="0" t="0" r="0" b="0"/><wp:wrapNone/><wp:docPr id="1" {doc_pr}>{ext}</wp:docPr><wp:cNvGraphicFramePr/><a:graphic><a:graphicData uri="http://schemas.microsoft.com/office/word/2010/wordprocessingGroup"><wpg:wgp><wpg:cNvGrpSpPr/><wpg:grpSpPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="2540000" cy="1270000"/><a:chOff x="0" y="0"/><a:chExt cx="2540000" cy="1270000"/></a:xfrm></wpg:grpSpPr><pic:pic><pic:nvPicPr><pic:cNvPr id="2" name="Picture 2"/><pic:cNvPicPr/></pic:nvPicPr><pic:blipFill><a:blip r:embed="img1"/><a:stretch><a:fillRect/></a:stretch></pic:blipFill><pic:spPr>{xfrm}<a:prstGeom prst="rect"><a:avLst/></a:prstGeom></pic:spPr></pic:pic><wps:wsp><wps:cNvPr id="3" name="Text Box 3"/><wps:cNvSpPr txBox="1"/><wps:spPr>{xfrm}<a:prstGeom prst="rect"><a:avLst/></a:prstGeom><a:noFill/><a:ln w="9525"><a:solidFill><a:srgbClr val="000000"/></a:solidFill></a:ln></wps:spPr><wps:txbx><w:txbxContent><w:p><w:r><w:t>{text}</w:t></w:r></w:p></w:txbxContent></wps:txbx><wps:bodyPr/></wps:wsp></wpg:wgp></a:graphicData></a:graphic></wp:anchor></w:drawing></w:r>"#
+    )
+}
+
+/// A click inside group `s` shows at 100, 100, 200 × 100 pt on page 1 takes the whole group, as
+/// one on its border does, in the body or in the header `in_header`; no text box is found there.
+fn taken_whole(s: &mut Session, in_header: bool, what: &str) {
     let l = s.layout();
-    let head = StoryRef::Part(l.pages[0].header_story.expect("a header"));
-    let Some(id) = l.header_footer_text_box_at(0, 120.0, 110.0) else { panic!("no text box in the header") };
-    assert_eq!(s.doc.plain_text(StoryRef::Part(id)), "TEXTINBOX");
-    assert!(l.object_at_in(0, 120.0, 110.0, 3.0, head).is_none(), "inside: the text");
-    assert!(l.object_at_in(0, 100.5, 150.0, 3.0, head).is_some_and(|o| o.text_box == Some(id)), "on the border: the box");
+    let story = if in_header { StoryRef::Part(l.pages[0].header_story.expect("a header")) } else { StoryRef::Body };
+    for (x, y) in [(120.0, 110.0), (200.0, 150.0), (100.5, 150.0)] {
+        let hit = l.object_at_in(0, x, y, 3.0, story).unwrap_or_else(|| panic!("{what}: nothing at {x}, {y}"));
+        assert_eq!((hit.rect, hit.text_box), (Rect::new(100.0, 100.0, 200.0, 100.0), None), "{what}: at {x}, {y}");
+    }
+    assert_eq!(l.header_footer_text_box_at(0, 120.0, 110.0), None, "{what}");
+}
+
+/// A DrawingML group isn't a text box, even when its text box fills it over a picture: a click
+/// inside it takes the whole group (as on `main`), in the body and in a header. Only the group
+/// read from a VML shape filled with a picture is clicked into.
+#[test]
+fn an_ordinary_group_whose_text_box_fills_it_is_taken_whole() {
+    let group = drawing_group("GROUPTEXT");
+    let mut s = open(&(para("ANCHOR", &group) + &para("END", "")));
+    assert_eq!(picture_fills(&s), [false]);
+    taken_whole(&mut s, false, "body");
+    let mut s = open_with(&para("BODY", ""), Some(&para("HEADER", &group)), &png(2));
+    taken_whole(&mut s, true, "header");
+}
+
+/// A group named and described like our mark, with an extension of another URI holding the
+/// mark's element, is an ordinary group, also once saved: only the mark's URI makes one.
+#[test]
+fn a_group_named_like_a_picture_fill_is_taken_whole() {
+    let doc_pr = r#"name="Picture fill 1" descr="urn:wordcraft:picture-fill" title="pictureFill""#;
+    let ext =
+        r#"<a:extLst><a:ext uri="urn:wordcraft:picture-fill:v2"><wcpf:pictureFill xmlns:wcpf="urn:wordcraft:picture-fill"/></a:ext></a:extLst>"#;
+    let mut s = open(&(para("ANCHOR", &named_group("GROUPTEXT", doc_pr, ext)) + &para("END", "")));
+    assert_eq!(picture_fills(&s), [false]);
+    taken_whole(&mut s, false, "named");
+    let mut back = reopened(&s);
+    assert_eq!(picture_fills(&back), [false]);
+    taken_whole(&mut back, false, "named, saved");
+    for d in [&s, &back] {
+        let alt = groups(d).first().and_then(|o| o.frame()).map(|(_, _, f)| (f.alt.text.clone(), f.alt.title.clone()));
+        assert_eq!(alt, Some(("urn:wordcraft:picture-fill".into(), "pictureFill".into())));
+    }
+}
+
+/// Saved and opened again, a text box filled with a picture is still clicked into, in the body
+/// and in a header, over an opaque picture and over a transparent one: the group keeps its mark
+/// (in its `wp:docPr`), and its description, title and decorative mark stay as they were. Saved
+/// twice, the same.
+#[test]
+fn saved_a_text_box_filled_with_a_picture_is_still_clicked_into() {
+    let style = "margin-left:100pt;margin-top:100pt;width:200pt;height:100pt";
+    for (picture, attrs) in [(png(2), ""), (png(6), r##"fillcolor="#00ffff""##)] {
+        let shape = text_box(style, attrs, "TEXTINBOX");
+        let mut s = open_with(&(para("ANCHOR", &shape) + &para("END", "")), None, &picture);
+        for b in &mut s.doc.body {
+            if let wordcraft_doc::Block::Para(p) = std::sync::Arc::make_mut(b) {
+                for o in &mut p.objects {
+                    if let InlineObject::Group { float, .. } = o {
+                        float.alt.text = "Firm logo".into();
+                        float.alt.title = "Logo".into();
+                        float.alt.decorative = !attrs.is_empty();
+                    }
+                }
+            }
+        }
+        let mut back = reopened(&s);
+        assert_eq!(picture_fills(&back), [true], "{attrs}");
+        assert_eq!(first_member(&back), first_member(&s), "{attrs}");
+        let alt = groups(&back).first().and_then(|o| o.frame()).map(|(_, _, f)| f.alt.clone());
+        let want = wordcraft_doc::para::AltText { text: "Firm logo".into(), title: "Logo".into(), decorative: !attrs.is_empty() };
+        assert_eq!(alt, Some(want), "{attrs}");
+        clicked_into(&mut back, false, &format!("saved {attrs}"));
+        let mut twice = reopened(&back);
+        assert_eq!(picture_fills(&twice), [true], "{attrs}");
+        clicked_into(&mut twice, false, &format!("saved twice {attrs}"));
+        let s = open_with(&para("BODY", ""), Some(&para("HEADER", &shape)), &picture);
+        clicked_into(&mut reopened(&s), true, &format!("saved {attrs}"));
+    }
+}
+
+/// Copied and pasted, undone and redone, or kept for recovery, the group is still the text box
+/// filled with a picture; an ordinary group is never written as one.
+#[test]
+fn a_text_box_filled_with_a_picture_stays_one_when_copied_and_undone() {
+    let style = "margin-left:100pt;margin-top:100pt;width:200pt;height:100pt";
+    let mut s = open(&(para("ANCHOR", &text_box(style, "", "TEXTINBOX")) + &para("END", "")));
+    let run = |s: &mut Session, id: &str| s.run(id, &serde_json::json!({})).unwrap();
+    run(&mut s, "select.all");
+    run(&mut s, "edit.copy");
+    run(&mut s, "caret.docEnd");
+    run(&mut s, "edit.paste");
+    assert_eq!(picture_fills(&s), [true, true], "pasted");
+    run(&mut s, "edit.undo");
+    assert_eq!(picture_fills(&s), [true], "undone");
+    run(&mut s, "edit.redo");
+    assert_eq!(picture_fills(&s), [true, true], "redone");
+    let json = serde_json::to_value(&s.doc).unwrap();
+    let kept: wordcraft_doc::Document = serde_json::from_value(json).unwrap();
+    assert_eq!(kept, s.doc, "recovered");
+    let group = open(&para("ANCHOR", &drawing_group("GROUPTEXT")));
+    assert!(serde_json::to_string(&s.doc).unwrap().contains(r#""picture_fill":true"#));
+    assert!(!serde_json::to_string(&group.doc).unwrap().contains("picture_fill"));
 }
 
 /// A text box turned half round keeps its picture and its text upright (Word for Mac: the

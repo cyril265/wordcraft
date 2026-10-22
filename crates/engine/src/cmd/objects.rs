@@ -1582,7 +1582,7 @@ fn group(s: &mut Session, _: &Value) -> CmdResult {
     // The group takes the first member's placement; its members keep their own alt text.
     let mut float = found.first().and_then(|(o, _)| o.frame()).map(|(_, _, f)| Float { alt: Default::default(), ..f.clone() }).unwrap_or_default();
     float.set_spin(Spin::default());
-    let grouped = InlineObject::Group { w, h, float, ch_w: w, ch_h: h, children, canvas: None };
+    let grouped = InlineObject::Group { w, h, float, ch_w: w, ch_h: h, children, canvas: None, picture_fill: false };
     // Take the members out, last first so the earlier positions hold, and put the group where
     // the first one was.
     let len = wordcraft_doc::para::OBJ.len_utf8();

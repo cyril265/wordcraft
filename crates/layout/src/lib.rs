@@ -3308,8 +3308,9 @@ fn group_members(o: &InlineObject, rect: Rect) -> Vec<(Rect, &InlineObject)> {
 }
 
 /// The text box filling group `o`'s whole frame `rect`, unturned in it: a click inside the group
-/// goes into its text, as for a text box of its own (a VML text box filled with a picture is read
-/// as a group of the picture and the text box over it).
+/// goes into its text, as for a text box of its own. Only for a group read from a VML text box
+/// filled with a picture (the picture and the text box over it, `picture_fill`); any other group
+/// is taken whole.
 fn framing_text_box(doc: &Document, o: &InlineObject, rect: Rect) -> Option<u32> {
     let same = |a: f32, b: f32| (a - b).abs() < 0.01;
     group_members(o, rect).into_iter().find_map(|(r, c)| {
@@ -3543,7 +3544,7 @@ fn place_objects(
                 InlineObject::Shape { story: Some(id), .. } if ctx.doc.parts.get(id).is_some_and(|p| p.kind == wordcraft_doc::PartKind::TextBox) => {
                     Some(*id)
                 }
-                InlineObject::Group { .. } => framing_text_box(ctx.doc, obj, rect),
+                InlineObject::Group { picture_fill: true, .. } => framing_text_box(ctx.doc, obj, rect),
                 _ => None,
             };
             // A box linked from another shows (and edits) that box's story.
