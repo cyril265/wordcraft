@@ -594,6 +594,9 @@ pub struct Exclusion {
     pub contour: Option<Arc<crate::contour::Contour>>,
     /// The sides of the object text may go on (Square, Tight, Through).
     pub side: WrapText,
+    /// Tight and Through wrapping: a line below the object looks for room row by row (see
+    /// `outline_row`).
+    pub rows: bool,
 }
 
 struct Builder<'a> {
@@ -2064,6 +2067,14 @@ fn break_lines(pl: &mut ParaLayout, env: &ParaEnv, mark_style: u32, level: Optio
         LineSpacing::Multiple(m) if natural_clear && m > 1.0 => (est_h / m).max(1.0),
         _ => est_h,
     };
+    // The step of the rows a line tries below an object text wraps through or tightly around
+    // (see `outline_row`): its height at single spacing, or its exact or least height.
+    let row_step = match rp.line_spacing {
+        LineSpacing::Exactly(v) if v.is_finite() && v > 0.0 => v,
+        LineSpacing::Multiple(m) if m.is_finite() && m > 0.0 => est_h / m,
+        LineSpacing::AtLeast(v) if v.is_finite() => v.max(est_h),
+        _ => est_h,
+    };
     // The rest of the current row: spans on the far side of floating objects, left to right.
     let mut row_rest: VecDeque<(f32, f32)> = VecDeque::new();
     let mut row_first = 0usize;
@@ -2109,7 +2120,9 @@ fn break_lines(pl: &mut ParaLayout, env: &ParaEnv, mark_style: u32, level: Optio
                     }
                     Err(below) if below > top && guard < 50 => {
                         // The first line keeps the paragraph's space before below the object.
-                        top = below + if lines.is_empty() { env.wrap_before.max(0.0) } else { 0.0 };
+                        let before = if lines.is_empty() { env.wrap_before.max(0.0) } else { 0.0 };
+                        let row = (est_clear.max(row_need), row_step.max(row_need), before);
+                        top = outline_row(exclusions, top, row, (lo, base_right), width).unwrap_or(below + before);
                         guard += 1;
                     }
                     Ok((None, _)) | Err(_) => {
@@ -2833,6 +2846,33 @@ const MIN_SPAN: f32 = 18.0;
 /// the lowest beside it: each row a line lower, the last one straight below that object (only
 /// beside an object taller than this many lines).
 const MAX_ROW_STEPS: usize = 2000;
+
+/// Below objects text wraps through or tightly around (an outline), Word looks for a line's room
+/// row by row: from where the line would go (`top`), down in steps of its height at single
+/// spacing (or its exact or least height; `step`) plus, for a paragraph's first line, its space
+/// before (`before`, which goes along with it), to the first row whose space before and line (`h`
+/// high) are clear of them or beside them. Measured in Word for Mac (modes 12, 14 and 15, Arial 10
+/// at single, 1.2 and exact 17 pt spacing, space before 0, 2.85 and 8 pt): below a full-width
+/// shape wrapped through or tight the line goes to the first such row at or below its bottom,
+/// below one wrapped square or top and bottom right below it. The top of that row's line, when
+/// the row at `top` is blocked only by such objects (`None` otherwise: the line goes right below
+/// them); after `MAX_ROW_STEPS` rows, right below the lowest of them.
+fn outline_row(exclusions: &[Exclusion], top: f32, (h, step, before): (f32, f32, f32), (lo, hi): (f32, f32), width: f32) -> Option<f32> {
+    let row = |e: &&Exclusion| e.bottom > top - before && e.top < top + h && e.right > lo && e.left < hi;
+    let blocking: Vec<&Exclusion> = exclusions.iter().filter(row).collect();
+    if blocking.is_empty() || blocking.iter().any(|e| !e.rows || e.top_bottom) || !step.is_finite() || step < 0.1 {
+        return None;
+    }
+    let lowest = blocking.iter().map(|e| e.bottom).fold(top, f32::max);
+    let mut t = top;
+    for _ in 0..MAX_ROW_STEPS {
+        t += step + before;
+        if row_spans(exclusions, t - before, before + h, (lo, hi), width).is_ok_and(|spans| !spans.is_empty()) {
+            return Some(t);
+        }
+    }
+    Some(lowest + before)
+}
 
 /// How many spans a line may skip while looking for one its first word fits, rows stepped down
 /// included: a backstop that only guarantees progress (past it the word is broken where it is,

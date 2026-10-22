@@ -1381,11 +1381,11 @@ fn layout_box(
                     Some(f) => {
                         let edges = table::float_edges(ctx, t);
                         let (r, area) = box_float_table_rect(frame, width, y, &tl, &f, edges, &float_tables);
-                        excl.push((float_table_wrap(area, edges), false, None, WrapText::BothSides));
+                        excl.push((float_table_wrap(area, edges), false, None, WrapText::BothSides, false));
                         float_tables.push(area);
                         table_areas.push(area);
                         if f.v_rel == Anchor::Page {
-                            page_table_wraps.push((area, false, None, WrapText::BothSides));
+                            page_table_wraps.push((area, false, None, WrapText::BothSides, false));
                         }
                         (r.x, r.y)
                     }
@@ -3186,8 +3186,10 @@ fn align_in((start, extent): (f32, f32), offset: f32, size: f32, align: Option<F
 }
 
 /// An area text keeps clear of: its bounds, whether text may only go above and below it, and
-/// (Tight and Through wrapping) the outline text follows inside it, and the sides text may go on.
-type WrapArea = (Rect, bool, Option<Arc<contour::Contour>>, WrapText);
+/// (Tight and Through wrapping) the outline text follows inside it, the sides text may go on,
+/// and whether a line below it looks for room row by row (Tight and Through, see
+/// [`para::Exclusion::rows`]).
+type WrapArea = (Rect, bool, Option<Arc<contour::Contour>>, WrapText, bool);
 
 /// Wrap areas a page starts with (#2048): by page index, the floating objects (block, object
 /// index) placed above the top of their anchor paragraph, with text before it on the page, and
@@ -3258,7 +3260,7 @@ fn merge_early(early: &mut EarlyFloats, found: EarlyFloats) {
             match have.iter_mut().find(|(eb, ek, _)| (*eb, *ek) == (b, k)) {
                 Some((_, _, seed)) if !covers(seed, &area) => {
                     let beside = seed.3 == area.3 && !seed.1 && !area.1;
-                    *seed = (seed.0.union(&area.0), !beside, None, area.3);
+                    *seed = (seed.0.union(&area.0), !beside, None, area.3, seed.4 && area.4);
                 }
                 Some(_) => {}
                 None => have.push((b, k, area)),
@@ -3278,19 +3280,20 @@ fn wrap_area(r: Rect, float: &Float, outline: Option<&[(f32, f32)]>) -> Option<W
     if matches!(float.wrap, Wrap::Tight | Wrap::Through)
         && let Some((area, c)) = outline.and_then(|o| contour::contour_area(r, float, o))
     {
-        return Some((area, false, Some(Arc::new(c)), float.wrap_text));
+        return Some((area, false, Some(Arc::new(c)), float.wrap_text, true));
     }
     let d = |v: f32| if v.is_finite() { v.clamp(0.0, 1584.0) } else { 0.0 };
     let (side, top, bottom) = (d(float.dist), d(float.dist_top), d(float.dist_bottom));
     // A rotated object keeps text clear of its rotated bounds.
     let r = float.spin().bounds(r);
-    Some((Rect::new(r.x - side, r.y - top, r.w + side * 2.0, r.h + top + bottom), float.wrap == Wrap::TopAndBottom, None, float.wrap_text))
+    let rows = matches!(float.wrap, Wrap::Tight | Wrap::Through);
+    Some((Rect::new(r.x - side, r.y - top, r.w + side * 2.0, r.h + top + bottom), float.wrap == Wrap::TopAndBottom, None, float.wrap_text, rows))
 }
 
 /// Wrap areas relative to a paragraph whose column starts at `x0` and whose top is `y0`.
 fn rel_exclusions(excl: &[WrapArea], x0: f32, y0: f32) -> Vec<para::Exclusion> {
     excl.iter()
-        .map(|(r, tb, c, side)| para::Exclusion {
+        .map(|(r, tb, c, side, rows)| para::Exclusion {
             top: r.y - y0,
             bottom: r.bottom() - y0,
             left: r.x - x0,
@@ -3298,6 +3301,7 @@ fn rel_exclusions(excl: &[WrapArea], x0: f32, y0: f32) -> Vec<para::Exclusion> {
             top_bottom: *tb,
             contour: c.clone(),
             side: *side,
+            rows: *rows,
         })
         .filter(|e| e.bottom > 0.0)
         .collect()
@@ -4766,7 +4770,7 @@ fn place_floating_table(
             pg.float_tables.push(Path::top(block));
         }
         let area = r.inset(-dl, -dt, -dr, -db);
-        let wrap: WrapArea = (float_table_wrap(area, edges), false, None, WrapText::BothSides);
+        let wrap: WrapArea = (float_table_wrap(area, edges), false, None, WrapText::BothSides, false);
         if at.is_none() {
             pb.excl.push(wrap.clone());
         }

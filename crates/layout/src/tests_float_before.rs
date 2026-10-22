@@ -1482,3 +1482,158 @@ fn a_line_of_pictures_keeps_only_them_clear_of_a_float_in_word_2013_layout_and_t
         }
     }
 }
+
+/// A page with text from 56.7 pt (Word's 2 cm margins), exact 17 pt lines, and a page-wide
+/// shape placed on the page at 60 pt, ending at `bottom`, wrapped `wrap`, anchored in paragraph
+/// `anchor` of `text`; `before` space before every paragraph, compatibility mode `mode`.
+fn below_shape(text: &str, anchor: usize, (bottom, top): (f32, f32), wrap: Wrap, before: f32, mode: u32) -> DocLayout {
+    let mut d = exact_text(text);
+    d.settings.compat_mode = mode;
+    d.last_section.margin_top = 56.7;
+    d.last_section.header = 0.0;
+    for b in &mut d.body {
+        if let Block::Para(p) = Arc::make_mut(b) {
+            p.props.space_before = Some(before);
+        }
+    }
+    let float = Float { wrap, h_rel: Anchor::Page, v_rel: Anchor::Page, y: top, ..Default::default() };
+    d.insert_object(&Pos::body(anchor, 0), rect_shape(612.0, bottom - top, float), &Default::default()).unwrap();
+    lay(&d)
+}
+
+#[test]
+fn below_a_shape_wrapped_through_or_tight_a_line_steps_down_by_its_height_and_space_before() {
+    // Measured in Word for Mac (A4, text from 56.7 pt, a page-wide shape from 60 pt wrapped
+    // through, exact 17 pt lines): the paragraph's first line goes to the first of the rows 56.7 +
+    // k × (17 + space before) whose space before starts at or below the shape's bottom, not right
+    // below it: with no space before at 192.7 for a shape ending at 190 or 192.5, at 209.7 for
+    // 195–207.5, at 226.7 for 210–215; with 2.85 pt before at 198.5 (row from 195.65) for 190–195,
+    // at 218.35 for 197.5–215. Tight wrapping the same; modes 12, 14 and 15 alike.
+    let cases = [
+        (190.0, 0.0, 192.7),
+        (192.5, 0.0, 192.7),
+        (195.0, 0.0, 209.7),
+        (207.5, 0.0, 209.7),
+        (210.0, 0.0, 226.7),
+        (215.0, 0.0, 226.7),
+        (190.0, 2.85, 198.5),
+        (195.0, 2.85, 198.5),
+        (197.5, 2.85, 218.35),
+        (215.0, 2.85, 218.35),
+    ];
+    for wrap in [Wrap::Through, Wrap::Tight] {
+        for mode in [12, 14, 15] {
+            for (bottom, before, want) in cases {
+                let l = below_shape("ZZZ\nAAA", 0, (bottom, 60.0), wrap, before, mode);
+                let zzz = top(&l, 0, 0);
+                assert!((zzz - want).abs() < 0.02, "{wrap:?}, mode {mode}, shape to {bottom}, {before} pt before: ZZZ at {zzz}, Word {want}");
+                let aaa = top(&l, 0, 1);
+                assert!((aaa - (want + 17.0 + before)).abs() < 0.02, "{wrap:?}, mode {mode}, shape to {bottom}: AAA at {aaa}");
+            }
+        }
+    }
+    // Square and top-and-bottom wrapping put the line right below the shape (with its space before).
+    for wrap in [Wrap::Square, Wrap::TopAndBottom] {
+        for (bottom, before) in [(195.0, 0.0), (207.5, 2.85)] {
+            let zzz = top(&below_shape("ZZZ\nAAA", 0, (bottom, 60.0), wrap, before, 15), 0, 0);
+            assert!((zzz - (bottom + before)).abs() < 0.02, "{wrap:?}, shape to {bottom}: ZZZ at {zzz}");
+        }
+    }
+}
+
+#[test]
+fn the_rows_below_a_shape_wrapped_through_start_where_the_line_would_go() {
+    // Word: with two paragraphs above a shape from 100 pt, the third (from 90.7) steps from its own
+    // top (192.7, 209.7 for shapes ending at 192.5 / 195), and so does the second line of a
+    // paragraph whose first line is above a shape from 80 pt (from 73.7). Exact least spacing of
+    // 20 pt steps by 20: 196.7 for shapes ending at 195, 216.7 for 197.5.
+    for (bottom, want) in [(192.5, 192.7), (195.0, 209.7)] {
+        let l = below_shape("P1\nP2\nZZZ\nAAA", 2, (bottom, 100.0), Wrap::Through, 0.0, 15);
+        assert!((top(&l, 0, 2) - want).abs() < 0.02, "third paragraph below a shape to {bottom}: {}", top(&l, 0, 2));
+        let mut d = exact_text("ZZZ\nAAA");
+        d.last_section.margin_top = 56.7;
+        d.last_section.header = 0.0;
+        if let Some(Block::Para(p)) = d.body.first_mut().map(Arc::make_mut) {
+            let props = p.props.clone();
+            *p = Paragraph::with_text("ZZZ\nYYY", Default::default());
+            p.props = props;
+        }
+        let float = Float { wrap: Wrap::Through, h_rel: Anchor::Page, v_rel: Anchor::Page, y: 80.0, ..Default::default() };
+        d.insert_object(&Pos::body(0, 0), rect_shape(612.0, bottom - 80.0, float), &Default::default()).unwrap();
+        let l = lay(&d);
+        let (first, second) = (lines_at(&l, 0, 0, 0), lines_at(&l, 0, 0, 1));
+        assert!((first - 56.7).abs() < 0.02 && (second - want).abs() < 0.02, "lines below a shape to {bottom}: {first}, {second}");
+    }
+    use wordcraft_doc::props::LineSpacing;
+    for (bottom, want) in [(195.0, 196.7), (197.5, 216.7)] {
+        let mut d = exact_text("ZZZ\nAAA");
+        d.last_section.margin_top = 56.7;
+        d.last_section.header = 0.0;
+        for b in &mut d.body {
+            if let Block::Para(p) = Arc::make_mut(b) {
+                p.props.line_spacing = Some(LineSpacing::AtLeast(20.0));
+            }
+        }
+        let float = Float { wrap: Wrap::Through, h_rel: Anchor::Page, v_rel: Anchor::Page, y: 60.0, ..Default::default() };
+        d.insert_object(&Pos::body(0, 0), rect_shape(612.0, bottom - 60.0, float), &Default::default()).unwrap();
+        let zzz = top(&lay(&d), 0, 0);
+        assert!((zzz - want).abs() < 0.02, "at least 20 pt, shape to {bottom}: ZZZ at {zzz}");
+    }
+}
+
+#[test]
+fn automatic_line_spacing_steps_below_a_shape_wrapped_through_by_the_single_line_height() {
+    // Word: Arial 10 at 1.2 lines (13.8 pt) steps by its single line height (11.5 pt) below a
+    // through-wrapped shape, in modes 12, 14 and 15, like single spacing: the rows are the same.
+    use wordcraft_doc::props::LineSpacing;
+    let at = |m: f32, bottom: f32, mode: u32| {
+        let mut d = exact_text("ZZZ\nAAA");
+        d.settings.compat_mode = mode;
+        d.last_section.margin_top = 56.7;
+        d.last_section.header = 0.0;
+        for b in &mut d.body {
+            if let Block::Para(p) = Arc::make_mut(b) {
+                p.props.line_spacing = Some(LineSpacing::Multiple(m));
+            }
+        }
+        let float = Float { wrap: Wrap::Through, h_rel: Anchor::Page, v_rel: Anchor::Page, y: 60.0, ..Default::default() };
+        d.insert_object(&Pos::body(0, 0), rect_shape(612.0, bottom - 60.0, float), &Default::default()).unwrap();
+        top(&lay(&d), 0, 0)
+    };
+    let single = {
+        let mut d = exact_text("ZZZ\nAAA");
+        for b in &mut d.body {
+            if let Block::Para(p) = Arc::make_mut(b) {
+                p.props.line_spacing = Some(LineSpacing::Multiple(1.0));
+            }
+        }
+        let l = lay(&d);
+        top(&l, 0, 1) - top(&l, 0, 0)
+    };
+    for mode in [12, 14, 15] {
+        for bottom in [190.0, 200.0, 215.0] {
+            let (one, wide) = (at(1.0, bottom, mode), at(1.2, bottom, mode));
+            let k = ((wide - 56.7) / single).round();
+            assert!(wide >= bottom - 0.01 && (wide - 56.7 - k * single).abs() < 0.05, "mode {mode}, shape to {bottom}: {wide}, rows of {single}");
+            assert!((one - wide).abs() < 0.02, "mode {mode}, shape to {bottom}: single {one}, 1.2 lines {wide}");
+        }
+    }
+}
+
+#[test]
+fn a_line_steps_at_most_2000_rows_below_shapes_wrapped_through() {
+    // Rows of exact 1 pt lines below a shape from 60 to 2560 pt on a 2600 pt page: after 2000 rows
+    // (56.7 + 2000 < 2560) the line goes right below the shape (stepping on would give 2560.7).
+    use wordcraft_doc::props::LineSpacing;
+    let mut d = exact_text("ZZZ");
+    d.last_section.margin_top = 56.7;
+    d.last_section.header = 0.0;
+    d.last_section.page_h = 2700.0;
+    if let Some(Block::Para(p)) = d.body.first_mut().map(Arc::make_mut) {
+        p.props.line_spacing = Some(LineSpacing::Exactly(1.0));
+    }
+    let float = Float { wrap: Wrap::Through, h_rel: Anchor::Page, v_rel: Anchor::Page, y: 60.0, ..Default::default() };
+    d.insert_object(&Pos::body(0, 0), rect_shape(612.0, 2500.0, float), &Default::default()).unwrap();
+    let zzz = top(&lay(&d), 0, 0);
+    assert!((zzz - 2560.0).abs() < 0.02, "ZZZ at {zzz}");
+}
