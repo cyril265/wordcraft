@@ -106,12 +106,12 @@ fn pages(d: &Document) -> (usize, Vec<Option<u32>>) {
 
 use Item::*;
 
+/// (body, Word's page count): the break is the last thing in the body's last paragraph,
+/// after text or alone, followed only by a bookmark; an empty paragraph after the break gets
+/// the new page, and so does a space, a second break or a paragraph holding a bookmark or a
+/// shape.
 #[test]
 fn a_page_break_ending_the_body_starts_no_page() {
-    // (body, Word's page count): the break is the last thing in the body's last paragraph,
-    // after text or alone, followed only by a bookmark; an empty paragraph after the break gets
-    // the new page, and so does a space, a second break or a paragraph holding a bookmark or a
-    // shape.
     let cases: &[(&[Item], usize)] = &[
         (&[Text("AAA"), Text("ZZZ\u{c}")], 1),
         (&[Text("AAA"), Text("\u{c}")], 1),
@@ -134,13 +134,13 @@ fn a_page_break_ending_the_body_starts_no_page() {
     }
 }
 
+/// (body, how the section after starts, Word's page count, the page number "BBB" is on): an
+/// empty paragraph (bookmarks don't count) closing a section after a page break stays with
+/// the break; the next section starts on the page after it, on the next even or odd page if
+/// it asks for one. Text or a shape in the closing paragraph, an empty paragraph before it or
+/// a column break instead of the page break start a page as usual.
 #[test]
 fn an_empty_paragraph_closing_a_section_after_a_page_break_starts_no_page() {
-    // (body, how the section after starts, Word's page count, the page number "BBB" is on): an
-    // empty paragraph (bookmarks don't count) closing a section after a page break stays with
-    // the break; the next section starts on the page after it, on the next even or odd page if
-    // it asks for one. Text or a shape in the closing paragraph, an empty paragraph before it or
-    // a column break instead of the page break start a page as usual.
     let cases: &[(&[Item], SectionStart, usize, u32)] = &[
         (&[Text("AAA"), Text("\u{c}"), Closing(""), Text("BBB")], SectionStart::NextPage, 2, 2),
         (&[Text("AAA\u{c}"), Closing(""), Text("BBB")], SectionStart::NextPage, 2, 2),
@@ -161,11 +161,11 @@ fn an_empty_paragraph_closing_a_section_after_a_page_break_starts_no_page() {
     }
 }
 
+/// (how the section after starts, Word's page count, the page number "BBB" is on): a page
+/// break in the paragraph closing its section starts no page of its own: a section starting
+/// on a new page (or an even one) starts on the next, a continuous one goes on on the page.
 #[test]
 fn a_page_break_ending_a_section_starts_no_page() {
-    // (how the section after starts, Word's page count, the page number "BBB" is on): a page
-    // break in the paragraph closing its section starts no page of its own: a section starting
-    // on a new page (or an even one) starts on the next, a continuous one goes on on the page.
     let cases = [(SectionStart::NextPage, 2, 2), (SectionStart::EvenPage, 2, 2), (SectionStart::Continuous, 1, 1)];
     for (next, want, bbb) in cases {
         let (n, firsts) = pages(&doc(&[Text("AAA"), Closing("\u{c}"), Text("BBB")], next));
@@ -173,10 +173,10 @@ fn a_page_break_ending_a_section_starts_no_page() {
     }
 }
 
+/// (body, how the section after starts, Word's page count, the page number "BBB" is on); an
+/// empty last paragraph that closes no section keeps its page break before.
 #[test]
 fn an_empty_paragraph_closing_a_section_ignores_its_page_break_before() {
-    // (body, how the section after starts, Word's page count, the page number "BBB" is on); an
-    // empty last paragraph that closes no section keeps its page break before.
     let cases: &[(&[Item], SectionStart, usize, u32)] = &[
         (&[Text("AAA"), ClosingBreakBefore, Text("BBB")], SectionStart::NextPage, 2, 2),
         (&[Text("AAA"), ClosingBreakBefore, Text("BBB")], SectionStart::EvenPage, 2, 2),
@@ -193,10 +193,10 @@ fn an_empty_paragraph_closing_a_section_ignores_its_page_break_before() {
     assert_eq!(pages(&d).0, 2);
 }
 
+/// After the break, the caret (the paragraph's mark) is on the break's page, below it, where
+/// Word shows the mark; the break is kept for saving.
 #[test]
 fn the_caret_after_a_final_page_break_stays_on_its_page() {
-    // After the break, the caret (the paragraph's mark) is on the break's page, below it, where
-    // Word shows the mark; the break is kept for saving.
     for text in ["ZZZ\u{c}", "\u{c}"] {
         let d = doc(&[Text("AAA"), Text(text)], SectionStart::NextPage);
         let l = lay(&d);
@@ -244,13 +244,13 @@ fn in_list(kind: wordcraft_doc::ListKind, items: &[Item], next: SectionStart, li
     (l.pages.len(), labels, last_top)
 }
 
+/// Word draws no label on an empty numbered paragraph that closes a section, and it doesn't
+/// count: after a page break, with page break before, in the middle of a page, before a
+/// continuous section (taking no room: BBB right under AAA), alone in its section; the next
+/// item is 2 (3 when a numbered break paragraph, which counts, comes first). An empty
+/// numbered paragraph that closes no section keeps its label.
 #[test]
 fn an_empty_paragraph_closing_a_section_has_no_list_label() {
-    // Word draws no label on an empty numbered paragraph that closes a section, and it doesn't
-    // count: after a page break, with page break before, in the middle of a page, before a
-    // continuous section (taking no room: BBB right under AAA), alone in its section; the next
-    // item is 2 (3 when a numbered break paragraph, which counts, comes first). An empty
-    // numbered paragraph that closes no section keeps its label.
     let one = |p: usize| vec![(p, "1.".to_string())];
     let cases: Vec<(&[Item], SectionStart, &[usize], usize, Vec<(usize, String)>)> = vec![
         (&[Text("AAA"), Text("\u{c}"), Closing(""), Text("BBB")], SectionStart::NextPage, &[0, 1, 2], 2, one(0)),
@@ -299,8 +299,13 @@ fn an_empty_list_paragraph_alone_in_its_section_keeps_its_line() {
     assert_eq!(numbered(&[Closing(""), Text("BBB")], SectionStart::Continuous, &[0, 1]).1, vec![(0, "1.".to_string())]);
 }
 
+/// A bundled font for the text, the marks and the list labels, so that lines don't depend on the
+/// installed fonts.
+const FONT: &str = "Source Sans 3";
+
 /// `Intro` (with a footnote), `Fill` `before` points below it, list items `AAA` and `AAB` (of
-/// `kind`, automatic space after) and `rest`, the blocks of `rest` at `listed` in their list.
+/// `kind`, automatic space after) and `rest`, the blocks of `rest` at `listed` in their list;
+/// every paragraph and label in [`FONT`], lines exactly 16 pt.
 fn after_items(kind: wordcraft_doc::ListKind, before: f32, rest: &[Item], listed: &[usize], next: SectionStart) -> Document {
     let mut items = vec![Text("Intro"), Text("Fill"), Text("AAA"), Text("AAB")];
     items.extend_from_slice(rest);
@@ -322,7 +327,24 @@ fn after_items(kind: wordcraft_doc::ListKind, before: f32, rest: &[Item], listed
     for &i in listed {
         d.para_mut(StoryRef::Body, &Path::top(4 + i)).unwrap().props.numbering = Some(wordcraft_doc::props::NumRef { num: id, level: 0 });
     }
+    for level in d.numbering.abstracts.iter_mut().flat_map(|a| a.levels.iter_mut()) {
+        level.chr.font = Some(FONT.into());
+    }
+    let last = d.body.len() - 1;
+    let end = d.para(StoryRef::Body, &Path::top(last)).map_or(0, |p| p.len());
+    d.format_range(&Pos::body(0, 0), &Pos::body(last, end), &|c| c.font = Some(FONT.into())).unwrap();
+    for i in 0..=last {
+        d.para_mut(StoryRef::Body, &Path::top(i)).unwrap().props.line_spacing = Some(wordcraft_doc::props::LineSpacing::Exactly(16.0));
+    }
     d
+}
+
+/// Where the lines of body block `b` are placed on page 1 (their origin), if they are.
+fn placed_y(l: &DocLayout, b: u32) -> Option<f32> {
+    l.pages.first()?.items.iter().find_map(|it| match it {
+        Placed::Lines { story: StoryRef::Body, path, l0: 0, y, .. } if path.0.first() == Some(&b) => Some(*y),
+        _ => None,
+    })
 }
 
 /// On a page with a footnote, a list item's last line keeps its automatic space after (14 pt)
@@ -356,21 +378,25 @@ fn an_empty_list_paragraph_closing_a_section_is_an_item_for_the_space_after_the_
 }
 
 /// Word drops the item's automatic space after before an empty numbered or bulleted paragraph
-/// closing a section as before another item: before a continuous section `BBB` comes 13.8 pt
-/// (one line) below `AAB` after such a paragraph, 27.8 pt after an unnumbered one. The
-/// closing paragraph sits where a list item would; unnumbered, where a plain paragraph would.
+/// closing a section as before another item: on a page with a footnote `AAB` moves to the next
+/// page at the same offset as before a list item (the test above), and before a continuous
+/// section `BBB` comes 13.8 pt (one line) below `AAB` after such a paragraph, 27.8 pt after an
+/// unnumbered one. Here the closing list paragraph is placed where a list item would be (the
+/// item's automatic space after dropped), an unnumbered one where a plain paragraph would. Before
+/// a continuous section the paragraph after it still comes 14 pt lower than in Word: the
+/// closing paragraph takes no room and the item's space after comes back (the same on `main`).
 #[test]
 fn an_empty_list_paragraph_closing_a_section_drops_the_automatic_space_after_the_item_before() {
     for kind in [wordcraft_doc::ListKind::Numbered, wordcraft_doc::ListKind::Bullet] {
         for next in [SectionStart::NextPage, SectionStart::Continuous] {
-            let top = |rest: &[Item], listed: &[usize]| {
+            let below_aab = |rest: &[Item], listed: &[usize]| {
                 let l = lay(&after_items(kind, 0.0, rest, listed, next));
-                let (aab, it) = (l.caret(&Pos::body(3, 0)).unwrap(), l.caret(&Pos::body(4, 0)).unwrap());
-                assert_eq!((aab.page, it.page), (0, 0));
-                it.top - aab.top
+                let (aab, it) = (placed_y(&l, 3), placed_y(&l, 4));
+                aab.zip(it).map(|(a, b)| b - a).unwrap_or_else(|| panic!("{kind:?}, {next:?}: AAB at {aab:?}, block 4 at {it:?} on page 1"))
             };
-            let (mark, item) = (top(&[Closing(""), Text("BBB")], &[0]), top(&[Text("CCC"), Text("BBB")], &[0]));
-            let (plain, text) = (top(&[Closing(""), Text("BBB")], &[]), top(&[Text("CCC"), Text("BBB")], &[]));
+            let (mark, item) = (below_aab(&[Closing(""), Text("BBB")], &[0]), below_aab(&[Text("CCC"), Text("BBB")], &[0]));
+            let (plain, text) = (below_aab(&[Closing(""), Text("BBB")], &[]), below_aab(&[Text("CCC"), Text("BBB")], &[]));
+            assert!((item - 16.0).abs() < 0.01, "{kind:?}, {next:?}: a list item one line below: {item}");
             assert!((mark - item).abs() < 0.01 && (plain - text).abs() < 0.01, "{kind:?}, {next:?}: {mark} {item}, {plain} {text}");
             assert!((text - item - wordcraft_doc::resolve::AUTO_SPACING).abs() < 0.01, "{kind:?}, {next:?}: {text} {item}");
         }
