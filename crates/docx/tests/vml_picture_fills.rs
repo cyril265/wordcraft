@@ -199,13 +199,9 @@ fn only_the_group_read_from_a_picture_fill_is_marked() {
     }
 }
 
-/// The mark is read where a file saved again elsewhere may have it: the drawing in
-/// `mc:AlternateContent`, the mark after another extension of its `wp:docPr` (the decorative mark,
-/// kept too), its element with a namespace declaration of its own.
-#[test]
-fn the_mark_is_read_beside_other_extensions_in_alternate_content() {
-    let d = read(&text_box(PAGE, "", "boxed"), &opaque());
-    let mut zip = zip::ZipArchive::new(std::io::Cursor::new(wordcraft_docx::write(&d).unwrap())).unwrap();
+/// `d` saved, its `document.xml` changed by `edit`, and read again.
+fn reread(d: &Document, edit: impl Fn(String) -> String) -> Result<Document, wordcraft_docx::DocxError> {
+    let mut zip = zip::ZipArchive::new(std::io::Cursor::new(wordcraft_docx::write(d).unwrap())).unwrap();
     let mut out = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
     for i in 0..zip.len() {
         let mut part = zip.by_index(i).unwrap();
@@ -213,35 +209,187 @@ fn the_mark_is_read_beside_other_extensions_in_alternate_content() {
         let mut bytes = Vec::new();
         std::io::Read::read_to_end(&mut part, &mut bytes).unwrap();
         if name == "word/document.xml" {
-            let xml = String::from_utf8(bytes).unwrap();
-            assert_eq!(xml.matches(MARK).count(), 1, "{xml}");
-            let decorative = r#"<a:ext uri="{C183D7F6-B498-43B3-948B-1728B52AA6E4}"><adec:decorative xmlns:adec="http://schemas.microsoft.com/office/drawing/2017/decorative" val="1"/></a:ext>"#;
-            let xml = xml
-                .replacen("<w:drawing>", r#"<mc:AlternateContent><mc:Choice Requires="wpg"><w:drawing>"#, 1)
-                .replacen("</w:drawing>", "</w:drawing></mc:Choice><mc:Fallback><w:pict/></mc:Fallback></mc:AlternateContent>", 1)
-                .replace(
-                    "<a:extLst><a:ext uri=\"urn:wordcraft:picture-fill\">",
-                    &format!("<a:extLst>{decorative}<a:ext uri=\"urn:wordcraft:picture-fill\">"),
-                )
-                .replace(r#"xmlns:wcpf="urn:wordcraft:picture-fill"/>"#, r#"xmlns:wcpf="urn:wordcraft:picture-fill" xmlns=""/>"#);
-            assert!(xml.contains(r#"<mc:Choice Requires="wpg"><w:drawing>"#) && xml.contains(&format!("<a:extLst>{decorative}<a:ext")), "{xml}");
-            bytes = xml.into_bytes();
+            bytes = edit(String::from_utf8(bytes).unwrap()).into_bytes();
         }
         out.start_file(name, zip::write::SimpleFileOptions::default()).unwrap();
-        std::io::Write::write_all(&mut out, &bytes).unwrap();
+        out.write_all(&bytes).unwrap();
     }
-    let again = wordcraft_docx::read(&out.finish().unwrap().into_inner()).unwrap();
+    wordcraft_docx::read(&out.finish().unwrap().into_inner())
+}
+
+/// The mark's extension as written, and the extension list holding it.
+const MARK_EXT: &str = r#"<a:ext uri="urn:wordcraft:picture-fill"><wcpf:pictureFill xmlns:wcpf="urn:wordcraft:picture-fill"/></a:ext>"#;
+const MARK_LIST: &str =
+    r#"<a:extLst><a:ext uri="urn:wordcraft:picture-fill"><wcpf:pictureFill xmlns:wcpf="urn:wordcraft:picture-fill"/></a:ext></a:extLst>"#;
+
+/// A text box filled with a picture, read as a marked group.
+fn marked_text_box() -> Document {
+    let d = read(&text_box(PAGE, "", "boxed"), &opaque());
+    assert_eq!(picture_fill(&paras(&d)[0].objects[0]), Some(true));
+    d
+}
+
+/// The first object of `d`'s first paragraph is a group with this mark.
+fn first_mark(d: &Document) -> Option<bool> {
+    paras(d).first().and_then(|p| p.objects.first()).and_then(picture_fill)
+}
+
+/// The mark is read where a file saved again elsewhere may have it: the drawing in
+/// `mc:AlternateContent`, the mark after another extension of its `wp:docPr` (the decorative mark,
+/// kept too), its element with a namespace declaration of its own.
+#[test]
+fn the_mark_is_read_beside_other_extensions_in_alternate_content() {
+    let decorative = r#"<a:ext uri="{C183D7F6-B498-43B3-948B-1728B52AA6E4}"><adec:decorative xmlns:adec="http://schemas.microsoft.com/office/drawing/2017/decorative" val="1"/></a:ext>"#;
+    let again = reread(&marked_text_box(), |xml| {
+        assert_eq!(xml.matches(MARK).count(), 1, "{xml}");
+        let xml = xml
+            .replacen("<w:drawing>", r#"<mc:AlternateContent><mc:Choice Requires="wpg"><w:drawing>"#, 1)
+            .replacen("</w:drawing>", "</w:drawing></mc:Choice><mc:Fallback><w:pict/></mc:Fallback></mc:AlternateContent>", 1)
+            .replace(MARK_LIST, &format!("<a:extLst>{decorative}{MARK_EXT}</a:extLst>"))
+            .replace(r#"xmlns:wcpf="urn:wordcraft:picture-fill"/>"#, r#"xmlns:wcpf="urn:wordcraft:picture-fill" xmlns=""/>"#);
+        assert!(xml.contains(r#"<mc:Choice Requires="wpg"><w:drawing>"#) && xml.contains(&format!("<a:extLst>{decorative}<a:ext")), "{xml}");
+        xml
+    })
+    .unwrap();
     let o = &paras(&again)[0].objects[0];
     assert_eq!(picture_fill(o), Some(true), "{o:?}");
     assert!(o.is_decorative());
     assert_eq!(part_text(&again, o), ["boxed"]);
 }
 
+/// In `mc:AlternateContent` whose Choice needs what isn't read here, the Fallback is read, and its
+/// drawing is marked when its own `wp:docPr` is: a marked drawing in the Fallback, an unmarked
+/// one, and an unmarked Fallback behind a marked drawing in the Choice.
+#[test]
+fn the_mark_of_a_drawing_in_a_fallback() {
+    let d = marked_text_box();
+    let drawing = |xml: &str| -> String {
+        let (Some(a), Some(b)) = (xml.find("<w:drawing>"), xml.find("</w:drawing>")) else { panic!("{xml}") };
+        xml[a..b + "</w:drawing>".len()].to_string()
+    };
+    for (choice_marked, fallback_marked) in [(None, true), (None, false), (Some(true), false)] {
+        let again = reread(&d, |xml| {
+            let marked = drawing(&xml);
+            let plain = marked.replace(MARK, "/>");
+            assert_ne!(marked, plain);
+            let choice = match choice_marked {
+                Some(true) => marked.clone(),
+                Some(false) => plain.clone(),
+                None => "<w:pict/>".to_string(),
+            };
+            let fallback = if fallback_marked { &marked } else { &plain };
+            xml.replacen(
+                &marked,
+                &format!(r#"<mc:AlternateContent><mc:Choice Requires="wpx9">{choice}</mc:Choice><mc:Fallback>{fallback}</mc:Fallback></mc:AlternateContent>"#),
+                1,
+            )
+        })
+        .unwrap();
+        assert_eq!(first_mark(&again), Some(fallback_marked), "choice {choice_marked:?}, fallback {fallback_marked}");
+        assert_eq!(part_text(&again, &paras(&again)[0].objects[0]), ["boxed"]);
+    }
+}
+
+/// A `pictureFill` payload nested `n` elements deep.
+fn deep_payload(n: usize) -> String {
+    format!(
+        r#"<a:extLst><a:ext uri="urn:wordcraft:picture-fill">{}{}</a:ext></a:extLst>"#,
+        "<wcpf:x xmlns:wcpf=\"urn:wordcraft:picture-fill\">".repeat(n),
+        "</wcpf:x>".repeat(n)
+    )
+}
+
+/// Only the mark's exact URI on an `a:ext` directly in the first extension list of the group's
+/// `wp:docPr` marks it, whatever else the list holds; nothing panics, and a list nested deeper
+/// than the XML reader allows makes the file unreadable with its usual limit error.
+#[test]
+fn the_mark_in_hostile_extension_lists() {
+    let other = |n: usize| format!(r#"<a:ext uri="urn:other:{n}"><o:x xmlns:o="urn:other"/></a:ext>"#);
+    let others = (0..2000).map(other).collect::<String>();
+    let uri = |u: &str| format!(r#"<a:extLst><a:ext uri="{u}"><wcpf:pictureFill xmlns:wcpf="urn:wordcraft:picture-fill"/></a:ext></a:extLst>"#);
+    let cases: Vec<(&str, String, bool)> = vec![
+        ("as written", MARK_LIST.into(), true),
+        ("no list", String::new(), false),
+        ("an empty list", "<a:extLst/>".into(), false),
+        ("no payload", r#"<a:extLst><a:ext uri="urn:wordcraft:picture-fill"/></a:extLst>"#.into(), true),
+        ("after 2000 others", format!("<a:extLst>{others}{MARK_EXT}</a:extLst>"), true),
+        ("twice", format!("<a:extLst>{MARK_EXT}{MARK_EXT}</a:extLst>"), true),
+        ("in the first of two lists", format!("{MARK_LIST}<a:extLst>{}</a:extLst>", other(1)), true),
+        ("in the second of two lists", format!("<a:extLst>{}</a:extLst>{MARK_LIST}", other(1)), false),
+        ("nested in another extension", format!(r#"<a:extLst><a:ext uri="urn:other">{MARK_LIST}</a:ext></a:extLst>"#), false),
+        ("in another namespace", r#"<a:extLst><o:ext xmlns:o="urn:other" uri="urn:wordcraft:picture-fill"/></a:extLst>"#.into(), false),
+        (
+            "DrawingML under another prefix",
+            r#"<d:extLst xmlns:d="http://schemas.openxmlformats.org/drawingml/2006/main"><d:ext uri="urn:wordcraft:picture-fill"/></d:extLst>"#
+                .into(),
+            true,
+        ),
+        ("a payload 200 deep", deep_payload(200), true),
+        ("upper case", uri("URN:WORDCRAFT:PICTURE-FILL"), false),
+        ("mixed case", uri("urn:WordCraft:picture-fill"), false),
+        ("a leading space", uri(" urn:wordcraft:picture-fill"), false),
+        ("a trailing space", uri("urn:wordcraft:picture-fill "), false),
+        ("a longer URI", uri("urn:wordcraft:picture-fill:v2"), false),
+        ("a shorter URI", uri("urn:wordcraft:picture"), false),
+        ("empty", uri(""), false),
+    ];
+    let d = marked_text_box();
+    let mut wrong = Vec::new();
+    for (what, list, marked) in cases {
+        let again = reread(&d, |xml| {
+            assert_eq!(xml.matches(MARK_LIST).count(), 1);
+            xml.replace(MARK_LIST, &list)
+        })
+        .unwrap_or_else(|e| panic!("{what}: {e}"));
+        if first_mark(&again) != Some(marked) {
+            wrong.push(what);
+        }
+        assert_eq!(part_text(&again, &paras(&again)[0].objects[0]), ["boxed"], "{what}");
+    }
+    assert_eq!(wrong, Vec::<&str>::new(), "read with the wrong mark");
+    let deep = reread(&d, |xml| xml.replace(MARK_LIST, &deep_payload(300)));
+    assert!(matches!(deep, Err(wordcraft_docx::DocxError::Limit(_))), "{deep:?}");
+}
+
+/// The mark on a drawing that isn't a group does nothing: a picture stays a picture, and a
+/// Drawing Canvas, never written with it, isn't marked when it has it.
+#[test]
+fn the_mark_on_a_picture_or_a_canvas() {
+    let picture = read(&rect(PAGE, r#"stroked="f""#, FRAME), &opaque());
+    assert!(image(&paras(&picture)[0].objects[0]).is_some());
+    let again = reread(&picture, |xml| {
+        let xml = xml.replacen(r#"descr=""/><wp:cNvGraphicFramePr"#, &format!(r#"descr="">{MARK_LIST}</wp:docPr><wp:cNvGraphicFramePr"#), 1);
+        assert_eq!(xml.matches(MARK_LIST).count(), 1, "{xml}");
+        xml
+    })
+    .unwrap();
+    assert!(image(&paras(&again)[0].objects[0]).is_some());
+    let mut canvas = marked_text_box();
+    for b in &mut canvas.body {
+        if let wordcraft_doc::Block::Para(p) = std::sync::Arc::make_mut(b) {
+            for o in &mut p.objects {
+                if let InlineObject::Group { canvas, .. } = o {
+                    *canvas = Some(wordcraft_doc::para::CanvasStyle::default());
+                }
+            }
+        }
+    }
+    let again = reread(&canvas, |xml| {
+        assert!(!xml.contains("urn:wordcraft:picture-fill"), "a canvas isn't written marked");
+        let xml = xml.replacen(r#"descr=""/><wp:cNvGraphicFramePr"#, &format!(r#"descr="">{MARK_LIST}</wp:docPr><wp:cNvGraphicFramePr"#), 1);
+        assert_eq!(xml.matches(MARK_LIST).count(), 1, "{xml}");
+        xml
+    })
+    .unwrap();
+    let o = &paras(&again)[0].objects[0];
+    assert!(matches!(o, InlineObject::Group { canvas: Some(_), picture_fill: false, .. }), "{o:?}");
+}
+
 /// Word draws the picture stretched over the shape's box, the outline and text over it, and only
 /// when the fill has an `o:title`; tiles, patterns, a fill without a type, a shape that isn't
 /// filled, a rounded rectangle, a half-transparent fill, a kept aspect, a missing picture and a
 /// fill turned off leave the shape as it was. An opaque picture hides the fill colour, so none is
-/// kept under it.
+/// kept under it. Saved as a DrawingML picture and groups, they read back the same.
 #[test]
 fn vml_shapes_filled_with_a_picture_are_drawn_with_it() {
     let body = [
@@ -290,7 +438,6 @@ fn vml_shapes_filled_with_a_picture_are_drawn_with_it() {
     assert_eq!(shape(11), Some((ShapeKind::Rectangle, white(), black)), "aspect kept");
     assert_eq!(shape(12), Some((ShapeKind::Rectangle, white(), black)), "no picture");
     assert_eq!(shape(13), Some((ShapeKind::Rectangle, None, black)), "fill turned off");
-    // Saved as a DrawingML picture and groups, and read back the same.
     let again = saved(&d);
     let back = paras(&again);
     assert_eq!(image(&back[0].objects[0]), image(&ps[0].objects[0]));
@@ -336,7 +483,6 @@ fn the_fill_colour_stays_under_a_picture_that_may_be_transparent() {
         assert!(on_page(&back[i].objects[0]), "{i} saved");
     }
     assert_eq!(part_text(&again, &back[1].objects[0]), ["TBTEXT"]);
-    // Which pictures may be transparent.
     let jpeg = [0xFF, 0xD8, 0xFF, 0xE0, 0, 16];
     for (picture, clear) in [
         (jpeg.to_vec(), false),

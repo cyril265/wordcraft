@@ -146,6 +146,8 @@ fn near(a: Rect, b: [f32; 4], tol: f32) -> bool {
 
 const FRAME: &str = r#"<v:fill type="frame" o:title="pic" r:id="img1"/>"#;
 
+/// Word draws the picture over the shape's box, the black 0.75 pt and red 4 pt outlines over it,
+/// and nothing for the shape that isn't filled.
 #[test]
 fn a_rectangle_filled_with_a_picture_is_drawn_with_it_under_its_outline() {
     let at = |y: u32| format!("margin-left:100pt;margin-top:{y}pt;width:200pt;height:100pt;{PAGE}");
@@ -158,8 +160,6 @@ fn a_rectangle_filled_with_a_picture_is_drawn_with_it_under_its_outline() {
     .concat();
     let mut s = open(&para("ANCHOR", &runs));
     let d = drawn(&mut s);
-    // Word: the picture over the shape's box; black 0.75 pt and red 4 pt outlines over it; none
-    // for the shape that isn't filled.
     let images = pictures(&d);
     assert_eq!(images.len(), 3, "{images:?}");
     for (r, y) in images.iter().zip([100.0, 300.0, 500.0]) {
@@ -169,15 +169,15 @@ fn a_rectangle_filled_with_a_picture_is_drawn_with_it_under_its_outline() {
     assert_eq!(lines, [(100.0, Rgb::BLACK, 0.75), (300.0, Rgb(0xFF, 0, 0), 4.0), (650.0, Rgb::BLACK, 0.75)]);
 }
 
+/// A shape like a letterhead logo, placed from the column and the line, with a white outline:
+/// Word draws its picture at 340.47, 59.67, 79.5 × 70.0 (the box 340.55, 59.75, 79.35 × 69.85
+/// and 0.08 pt more on each side).
 #[test]
 fn a_logo_placed_from_its_line_is_where_word_draws_it() {
-    // A shape like a letterhead logo: placed from the column and the line, a white outline.
     let style = "margin-left:268.55pt;margin-top:-12.25pt;width:79.35pt;height:69.85pt;mso-position-horizontal-relative:text;mso-position-vertical-relative:line";
     let fill = r#"<v:fill type="frame" o:title="logo" recolor="t" r:id="img1"/><o:lock v:ext="edit" aspectratio="t"/>"#;
     let mut s = open(&(para("ANCHOR", &rect(style, r#"strokecolor="white [3212]""#, fill)) + &para("END", "")));
     let d = drawn(&mut s);
-    // Word: 340.47, 59.67, 79.5 × 70.0 (the box 340.55, 59.75, 79.35 × 69.85 and 0.08 pt more on
-    // each side).
     let images = pictures(&d);
     assert_eq!(images.len(), 1, "{images:?}");
     assert!(near(images[0], [340.47, 59.67, 79.5, 70.0], 0.16), "{:?}", images[0]);
@@ -186,13 +186,13 @@ fn a_logo_placed_from_its_line_is_where_word_draws_it() {
     assert_eq!(o[0].1, Rgb::WHITE);
 }
 
+/// Word draws the picture at 100, 100, 200 × 100, the outline and then the text 7.55 pt in from
+/// the box's left edge (its 7.2 pt margin) over it.
 #[test]
 fn a_text_box_filled_with_a_picture_shows_its_text_over_it() {
     let style = "margin-left:100pt;margin-top:100pt;width:200pt;height:100pt";
     let mut s = open(&para("ANCHOR", &text_box(style, "", "TEXTINBOX")));
     let d = drawn(&mut s);
-    // Word: the picture at 100, 100, 200 × 100, the outline and then the text 7.55 pt in from the
-    // box's left edge (its 7.2 pt margin) over it.
     let want = [
         Drawn::Picture(Rect::new(100.0, 100.0, 200.0, 100.0)),
         Drawn::Shape(Rect::new(100.0, 100.0, 200.0, 100.0), None, Some(Rgb::BLACK), 0.75),

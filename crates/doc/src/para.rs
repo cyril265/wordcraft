@@ -513,8 +513,9 @@ pub enum InlineObject {
         /// Made by the DOCX reader from a legacy VML rectangle or text box filled with a picture
         /// (`v:fill type="frame"`): its members are the shape's layers, and the text box over
         /// them, when it fills the group, takes clicks inside it into its text, as the shape did.
-        /// DOCX keeps it in the drawing's `wp:docPr` extension list (WordCraft's own URI); other
-        /// formats write an ordinary group.
+        /// DOCX keeps it in the drawing's `wp:docPr` extension list (WordCraft's own URI), and
+        /// native JSON as this field; the other writers ignore it and treat the group as any
+        /// other.
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         picture_fill: bool,
     },
