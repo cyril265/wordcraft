@@ -2040,12 +2040,12 @@ fn break_lines(pl: &mut ParaLayout, env: &ParaEnv, mark_style: u32, level: Optio
     let mut i = 0usize;
     let mut top = 0.0f32;
     let mut first = true;
-    let est_h = pl
-        .styles
-        .get(mark_style as usize)
-        .map(|st| (st.ascent + st.descent) * if let LineSpacing::Multiple(m) = rp.line_spacing { m } else { 1.0 })
-        .unwrap_or(14.0)
-        .max(1.0);
+    let natural = pl.styles.get(mark_style as usize).map(|st| st.ascent + st.descent);
+    let est_h = match rp.line_spacing {
+        LineSpacing::Multiple(m) => natural.map_or(14.0, |h| h * m),
+        LineSpacing::AtLeast(v) | LineSpacing::Exactly(v) => natural.unwrap_or(14.0).max(v),
+    }
+    .max(1.0);
     // The rest of the current row: spans on the far side of floating objects, left to right.
     let mut row_rest: VecDeque<(f32, f32)> = VecDeque::new();
     let mut row_first = 0usize;
