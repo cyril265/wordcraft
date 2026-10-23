@@ -592,8 +592,9 @@ fn layout_time_ratio(doc: impl Fn(usize) -> Document, n: usize, opts: &LayoutOpt
 }
 
 /// A document that is one word with no break opportunity in it, laid out beside a floating
-/// object: the word is wider than the span the object leaves, so the measurement that asks
-/// whether it would fit the full line runs for every line the word takes.
+/// object: the word is wider than the strip the object leaves, the row's only span, so it is
+/// split across the strip a line per few characters, and nothing done for one of those lines may
+/// walk the rest of the word.
 fn long_word_beside_a_float(n: usize) -> Document {
     use wordcraft_doc::para::{Anchor, Float, Wrap};
     let mut d = Document::from_text(&"a".repeat(n));
@@ -721,13 +722,53 @@ fn long_word_with_alternating_advances_beside_a_float(n: usize) -> Document {
     d
 }
 
-/// A word whose advances alternate in sign lays out in linear time: the measurement that asks
-/// whether it would fit the full line must not walk the word again for every line it takes.
+/// A word whose advances alternate in sign lays out in linear time: nothing done for a line it
+/// takes may walk the rest of the word.
 #[test]
 fn a_word_with_alternating_advances_lays_out_in_linear_time() {
     let (t1, tk, ratio) = layout_time_ratio(long_word_with_alternating_advances_beside_a_float, 50_000, &LayoutOptions::default());
     eprintln!("t(n) {t1:.4} s, t(8n) {tk:.4} s, ratio {ratio:.1}");
     assert!(ratio < 24.0, "8x the word took {ratio:.1}x the time ({t1:.4} s → {tk:.4} s): not linear");
+}
+
+/// A word with no break opportunity in it, laid out beside a 400 pt tall floating object in the
+/// middle of the column: every row beside the object is split in two, so the word is tried in
+/// both spans of every row there before it moves on below the object and is broken across the
+/// lines.
+fn long_word_beside_a_float_in_the_middle(n: usize) -> Document {
+    use wordcraft_doc::para::{Anchor, Float, Wrap};
+    let mut d = Document::from_text(&"a".repeat(n));
+    let f = Float { wrap: Wrap::Square, h_rel: Anchor::Column, v_rel: Anchor::Paragraph, x: 160.0, dist: 9.0, ..Default::default() };
+    d.insert_object(&Pos::body(0, 0), rect_shape(144.0, 400.0, f), &Default::default()).unwrap();
+    d
+}
+
+/// A word moving down the rows a floating object splits is tried in every span of every row
+/// beside it, and each try costs the span it is tried in, not the rest of the word: the layout
+/// stays linear in the word's length. The word is 5,000 characters (and 40,000), a few pages, so
+/// that what the layout does once per page for the paragraph stays out of the ratio and the line
+/// breaking is what is timed.
+#[test]
+fn a_long_unbreakable_word_moving_down_a_split_row_lays_out_in_linear_time() {
+    let l = lay(&long_word_beside_a_float_in_the_middle(2_000));
+    let Some(Placed::Lines { para, .. }) = l.pages[0].items.iter().find(|i| matches!(i, Placed::Lines { story: StoryRef::Body, .. })) else {
+        panic!("no body text on the page")
+    };
+    let first = para.lines.iter().find(|ln| ln.c1 > ln.c0).map(|ln| (ln.top, ln.left));
+    assert!(first.is_some_and(|(top, left)| top >= 400.0 - 0.01 && left < 1.0), "the word moves on below the object: {first:?}");
+    let (t1, tk, ratio) = layout_time_ratio(long_word_beside_a_float_in_the_middle, 5_000, &LayoutOptions::default());
+    eprintln!("t(n) {t1:.4} s, t(8n) {tk:.4} s, ratio {ratio:.1}");
+    assert!(ratio < 24.0, "8x the word took {ratio:.1}x the time ({t1:.4} s → {tk:.4} s): not linear");
+}
+
+/// A megabyte-long word moving down the rows a floating object splits lays out in a fraction of
+/// a second, as it does beside an object that leaves a single strip.
+#[test]
+fn a_megabyte_long_word_moving_down_a_split_row_lays_out_quickly() {
+    let d = long_word_beside_a_float_in_the_middle(1_000_000);
+    let t = std::time::Instant::now();
+    lay(&d);
+    assert!(t.elapsed().as_secs() < 15, "a megabyte-long word took {:?}", t.elapsed());
 }
 
 #[test]
