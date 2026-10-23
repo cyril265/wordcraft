@@ -64,6 +64,9 @@ const INK_GROUP: &str = "a group holding Word ink can't be ungrouped yet";
 fn holds_ink(o: &InlineObject) -> bool {
     matches!(o, InlineObject::Group { children, .. } if children.iter().any(|c| matches!(&c.obj, InlineObject::Graphic { graphic, .. } if graphic.kind == GraphicKind::Ink)))
 }
+/// A group keeps at most [`wordcraft_doc::para::MAX_GROUP_CHILDREN`] members; Group refuses
+/// rather than leave the members past it out (a group among the objects counts its members).
+const TOO_MANY_MEMBERS: &str = "a group holds at most 1000 pictures and shapes";
 /// A VML rectangle or text box filled with a picture is read as a group of its layers, but it is
 /// one shape, as Word has it: there is nothing to ungroup (its text box, on its own over the
 /// picture, would no longer take clicks inside it).
@@ -1567,6 +1570,9 @@ fn group(s: &mut Session, _: &Value) -> CmdResult {
     }
     if shown.is_empty() {
         return Err(CmdError::Failed("nothing to group".into()));
+    }
+    if shown.len() > wordcraft_doc::para::MAX_GROUP_CHILDREN {
+        return Err(CmdError::Disabled(TOO_MANY_MEMBERS.into()));
     }
     let (w, h) = ((x1 - x0).clamp(1.0, MAX_OFFSET), (y1 - y0).clamp(1.0, MAX_OFFSET));
     // Each member keeps its turn: the group itself starts unturned.

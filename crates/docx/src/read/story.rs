@@ -1648,7 +1648,10 @@ impl Reader<'_> {
 
     /// The members of VML group `g` into `out`, mapped into the outermost group's space by `t`
     /// (x0, y0, sx, sy: outer = x0 + inner × sx). A member is placed by `left`/`top` in that
-    /// space, except a `v:line`, which carries its own offset in `from`.
+    /// space, except a `v:line`, which carries its own offset in `from`. Members are read up to
+    /// [`wordcraft_doc::para::MAX_GROUP_CHILDREN`]; a member filled with a picture gives all its
+    /// layers or, when they don't fit, none, and reading stops there without the text box stories
+    /// it made.
     fn vml_group_members(
         &mut self,
         sc: &mut StoryCtx,
@@ -1684,6 +1687,9 @@ impl Reader<'_> {
                 self.vml_group_members(sc, pict, e, rels, nt, depth + 1, out);
                 continue;
             }
+            let room = wordcraft_doc::para::MAX_GROUP_CHILDREN.saturating_sub(out.len());
+            let parts_before: Option<std::collections::BTreeSet<u32>> =
+                (room < MAX_PICTURE_FILL_LAYERS).then(|| self.doc.parts.keys().copied().collect());
             let Some(mut obj) = self.read_vml_shape(sc, pict, e, rels, Some((sx, sy))) else { continue };
             // A member is placed by `x`/`y`, so a line's own offset comes off the member itself.
             let (dx, dy) = match obj.float_mut() {
@@ -1699,10 +1705,13 @@ impl Reader<'_> {
                 Some(fill) => picture_fill_layers(obj, fill, false),
                 None => vec![(0.0, 0.0, obj)],
             };
-            for (lx, ly, obj) in layers {
-                if out.len() >= wordcraft_doc::para::MAX_GROUP_CHILDREN {
-                    return;
+            if layers.len() > room {
+                if let Some(before) = parts_before {
+                    self.doc.parts.retain(|id, _| before.contains(id));
                 }
+                return;
+            }
+            for (lx, ly, obj) in layers {
                 out.push(wordcraft_doc::para::GroupChild { x: fit(x + lx, -max), y: fit(y + ly, -max), obj });
             }
         }
@@ -2327,13 +2336,17 @@ fn picture_fillable(obj: &InlineObject) -> bool {
     !spin.flip_h && !spin.flip_v && (quarters - quarters.round()).abs() < 1e-4
 }
 
+/// Most layers [`picture_fill_layers`] gives one shape: its fill colour, its picture, and its
+/// outline and text.
+const MAX_PICTURE_FILL_LAYERS: usize = 3;
+
 /// The layers Word draws for `obj`, a VML shape [`picture_fillable`] filled with `fill`, each at
 /// its offset in the shape's frame: the shape's fill colour when the picture may let it through,
 /// the picture stretched over the frame, and the shape with no fill when its outline or text
 /// shows. The picture is upright: on a shape turned by a quarter turn it covers the turned frame.
 /// `own_frame`: the layers make up a group turned as the shape was, so the picture turns back;
 /// otherwise they are members of the shape's group, each turned (and hidden) as the shape was.
-/// Anything else is one layer, as it is.
+/// Anything else is one layer, as it is. At most [`MAX_PICTURE_FILL_LAYERS`].
 fn picture_fill_layers(obj: InlineObject, fill: PictureFill, own_frame: bool) -> Vec<(f32, f32, InlineObject)> {
     if !picture_fillable(&obj) {
         return vec![(0.0, 0.0, obj)];

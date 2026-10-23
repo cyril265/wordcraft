@@ -592,3 +592,44 @@ fn group_members_filled_with_a_picture() {
         assert_eq!(text, ["GRPTEXT"]);
     }
 }
+
+/// A `v:group` of `n` small rectangles, then `member`, then one more rectangle.
+fn group_of(n: usize, member: &str) -> String {
+    let rect = |i: usize| format!(r#"<v:rect style="position:absolute;left:{};top:0;width:1;height:1" stroked="f"/>"#, i % 200);
+    let rects: String = (0..n).map(rect).collect();
+    let last = rect(0);
+    para(&format!(
+        r#"{TEXT_BOX_TYPE}<v:group style="position:absolute;margin-left:0;margin-top:0;width:200pt;height:200pt" coordorigin="0,0" coordsize="200,200">{rects}{member}{last}</v:group>"#
+    ))
+}
+
+/// A `v:group` keeps at most `MAX_GROUP_CHILDREN` members, and a member filled with a picture is
+/// all its layers or none: after 997, 998 or 999 rectangles, a text box filled with a picture
+/// that may be transparent (three layers) or an opaque one (two) is there whole when it fits,
+/// else not at all, its story with it; the rectangles before it stay, the one after it doesn't.
+#[test]
+fn a_picture_fill_at_the_group_limit_is_kept_whole_or_not_at_all() {
+    let member = format!(
+        r##"<v:shape type="#_x0000_t202" style="position:absolute;left:0;top:100;width:200;height:100" fillcolor="#00ffff">{FRAME}<v:textbox><w:txbxContent><w:p><w:r><w:t>LIMIT</w:t></w:r></w:p></w:txbxContent></v:textbox></v:shape>"##
+    );
+    let limit = wordcraft_doc::para::MAX_GROUP_CHILDREN;
+    let rectangle = Layer::Shape(ShapeKind::Rectangle, solid(Rgb::WHITE), None, false);
+    let picture = Layer::Picture(0.0, 0.0, 200.0, 100.0, 0.0);
+    let text = Layer::Shape(ShapeKind::TextBox, None, Some(Rgb::BLACK), true);
+    let under = Layer::Shape(ShapeKind::Rectangle, solid(CYAN), None, false);
+    for (before, clear) in [(limit - 1, true), (limit - 1, false), (limit - 2, true), (limit - 2, false), (limit - 3, true)] {
+        let d = read(&group_of(before, &member), &if clear { see_through() } else { opaque() });
+        let InlineObject::Group { children, .. } = &paras(&d)[0].objects[0] else { panic!("{:?}", paras(&d)[0].objects) };
+        let got: Vec<Layer> = children.iter().map(|c| layer(0.0, 0.0, &c.obj)).collect();
+        let whole = if clear { vec![under.clone(), picture.clone(), text.clone()] } else { vec![picture.clone(), text.clone()] };
+        let fits = before + whole.len() <= limit;
+        let mut want = vec![rectangle.clone(); before];
+        if fits {
+            want.extend(whole);
+        }
+        assert_eq!(got.len(), want.len(), "{before} before, clear {clear}");
+        assert!(got == want, "{before} before, clear {clear}: the member is partial: {:?}", got.get(before..));
+        let boxes = d.parts.values().filter(|p| p.kind == wordcraft_doc::PartKind::TextBox).count();
+        assert_eq!(boxes, usize::from(fits), "{before} before, clear {clear}: its story");
+    }
+}

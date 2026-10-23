@@ -562,3 +562,40 @@ fn a_group_made_with_a_text_box_filled_with_a_picture_ungroups_into_its_members(
     run(&mut s, "edit.undo", serde_json::json!({})).unwrap();
     assert_eq!(picture_fills(&s), [false], "undone: the group");
 }
+
+/// A floating `v:group` of `n` small rectangles at 100, 400, 200 × 100 pt on the page, and the
+/// text box filled with a picture that may be transparent (three layers) at 100, 100.
+fn rectangles_and_text_box(n: usize) -> Session {
+    let rects: String =
+        (0..n).map(|i| format!(r#"<v:rect style="position:absolute;left:{};top:0;width:1;height:1" stroked="f"/>"#, i % 200)).collect();
+    let group = format!(
+        r#"<w:r><w:pict><v:group style="position:absolute;margin-left:100pt;margin-top:400pt;width:200pt;height:100pt;z-index:1;{PAGE}" coordorigin="0,0" coordsize="200,100">{rects}</v:group></w:pict></w:r>"#
+    );
+    let style = "margin-left:100pt;margin-top:100pt;width:200pt;height:100pt";
+    let runs = group + &text_box(style, r##"fillcolor="#00ffff""##, "TEXTINBOX");
+    open_with(&(para("ANCHOR", &runs) + &para("END", "")), None, &png(6))
+}
+
+/// Group (Layout › Arrange › Group) makes a group of at most `MAX_GROUP_CHILDREN` members, a
+/// group among the objects counting its members: 997 rectangles and a text box filled with a
+/// picture (its three layers) make one, 998 are refused and leave both as they were, the text
+/// box still clicked into, rather than a group without the members past the limit.
+#[test]
+fn group_refuses_more_members_than_a_group_keeps() {
+    let limit = wordcraft_doc::para::MAX_GROUP_CHILDREN;
+    let mut s = rectangles_and_text_box(limit - 3);
+    select_objects(&mut s, &[0, 3]);
+    run(&mut s, "arrange.group", serde_json::json!({})).unwrap();
+    let members = groups(&s).first().map(|o| match o {
+        InlineObject::Group { children, .. } => children.len(),
+        _ => 0,
+    });
+    assert_eq!(members, Some(limit));
+    let mut s = rectangles_and_text_box(limit - 2);
+    assert_eq!(picture_fills(&s), [false, true]);
+    select_objects(&mut s, &[0, 3]);
+    let err = run(&mut s, "arrange.group", serde_json::json!({})).unwrap_err();
+    assert!(matches!(err, wordcraft_engine::CmdError::Disabled(_)), "{err:?}");
+    assert_eq!(picture_fills(&s), [false, true]);
+    clicked_into(&mut s, false, "not grouped");
+}
