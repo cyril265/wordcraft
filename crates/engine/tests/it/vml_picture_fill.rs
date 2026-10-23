@@ -457,6 +457,59 @@ fn a_text_box_turned_half_round_keeps_its_picture_upright() {
     assert_eq!(drawn(&mut s), want);
 }
 
+/// Where a click on page 1 goes, over a grid around the box at 100, 100, 200 × 100 pt, in the
+/// body or in the header `in_header`: into the text box's text, the text around it, or the box
+/// on its border; and where the caret at the start of the box's text is.
+fn clicks(s: &mut Session, in_header: bool) -> Vec<String> {
+    let l = s.layout();
+    let Some(id) = s.doc.parts.iter().find(|(_, p)| p.kind == wordcraft_doc::PartKind::TextBox).map(|(id, _)| *id) else { return Vec::new() };
+    let story = if in_header { l.pages[0].header_story.map(StoryRef::Part).unwrap_or(StoryRef::Body) } else { StoryRef::Body };
+    let mut out = Vec::new();
+    for y in (40..=260).step_by(10) {
+        for x in (90..=310).step_by(10) {
+            let (x, y) = (x as f32, y as f32);
+            let text = if in_header { l.header_footer_text_box_at(0, x, y).map(StoryRef::Part) } else { l.story_at(0, x, y) };
+            let text = if text == Some(StoryRef::Part(id)) { "box text".to_string() } else { format!("{text:?}") };
+            let grabbed = l.object_at_in(0, x, y, 3.0, story).map(|o| (o.rect, o.spin, o.text_box == Some(id)));
+            out.push(format!("{x}, {y}: {text}, {grabbed:?}"));
+        }
+    }
+    let start = wordcraft_doc::Pos { story: StoryRef::Part(id), path: wordcraft_doc::Path::top(0), off: 0 };
+    out.push(format!("caret {:?}", l.caret(&start).map(|c| (c.x, c.top, c.height))));
+    out
+}
+
+/// Turned a quarter or three quarters round, a text box filled with a picture takes clicks, in
+/// the body and in a header, where the same text box without the picture does (as on `main`,
+/// which reads it so): its text where the text is laid out, upright in the unturned frame (its
+/// first letters at 120, 110 lie outside the turned frame), and the box on its turned border;
+/// the caret is where that text box has it.
+#[test]
+fn a_turned_text_box_filled_with_a_picture_takes_clicks_as_one_without_it() {
+    for deg in [90, 270] {
+        let style = format!("margin-left:100pt;margin-top:100pt;width:200pt;height:100pt;rotation:{deg}");
+        let filled = text_box(&style, r##"fillcolor="#00ffff""##, "TEXTINBOX");
+        let plain = filled.replace(FRAME, "");
+        for in_header in [false, true] {
+            let doc = |runs: &str| {
+                if in_header {
+                    open_with(&para("BODY", ""), Some(&para("HEADER", runs)), &png(6))
+                } else {
+                    open_with(&(para("ANCHOR", runs) + &para("END", "")), None, &png(6))
+                }
+            };
+            let (mut with, mut without) = (doc(&filled), doc(&plain));
+            if !in_header {
+                assert_eq!(picture_fills(&with), [true], "{deg}°");
+                assert!(groups(&without).is_empty(), "{deg}°");
+            }
+            let want = clicks(&mut without, in_header);
+            assert!(want.iter().any(|c| c.starts_with("120, 110: box text")), "{deg}°, header {in_header}: the first letters: {want:#?}");
+            assert_eq!(clicks(&mut with, in_header), want, "{deg}°, header {in_header}");
+        }
+    }
+}
+
 /// The text box filled with a picture (cyan under a picture that may be transparent) at 100, 100
 /// and a red rectangle at 100, 300, both 200 × 100 pt on the page, anchored in one paragraph.
 fn text_box_and_rectangle() -> Session {
