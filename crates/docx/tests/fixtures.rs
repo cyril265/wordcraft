@@ -3480,6 +3480,22 @@ fn roman_fonts_are_read_from_the_font_table() {
     assert_eq!(d.settings.roman_fonts, ["Brand Serif"]);
 }
 
+/// A font table entry's `w:name` is the name runs refer to: it is kept as written for the entry's
+/// alternate as for its roman class and for a run's `w:rFonts`, so an alternate applies to exactly
+/// the runs the roman class does. The alternate itself is a font to look up, trimmed.
+#[test]
+fn a_font_tables_name_is_kept_as_written_for_its_alternate_as_for_its_roman_class() {
+    let fonts = format!(
+        r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:fonts {W_NS}><w:font w:name=" Spaced Font "><w:altName w:val=" Arial "/><w:family w:val="roman"/></w:font></w:fonts>"#
+    );
+    let body = r#"<w:p><w:r><w:rPr><w:rFonts w:ascii=" Spaced Font " w:hAnsi=" Spaced Font "/></w:rPr><w:t>x</w:t></w:r></w:p>"#;
+    let rels = [("rId9", "fontTable", "fontTable.xml")];
+    let d = wordcraft_docx::read(&docx(body, &rels, &[("word/fontTable.xml", &fonts)])).unwrap();
+    assert_eq!(d.settings.roman_fonts, [" Spaced Font "]);
+    assert_eq!(d.settings.font_alt_names, [(" Spaced Font ".to_string(), "Arial".to_string())]);
+    assert_eq!(paras(&d)[0].runs[0].props.font.as_deref(), Some(" Spaced Font "));
+}
+
 /// The font table's alternate names: Word draws a font it doesn't have in its `w:altName`.
 #[test]
 fn font_alt_names_are_read_from_the_font_table_and_kept_on_save() {
