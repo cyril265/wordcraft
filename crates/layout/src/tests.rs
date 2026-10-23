@@ -621,11 +621,11 @@ fn a_megabyte_long_word_lays_out_quickly() {
     assert!(t.elapsed().as_secs() < 15, "a megabyte-long word took {:?}", t.elapsed());
 }
 
-/// A word that a negative advance makes narrower still fits beside a float: the width of a word
-/// is the sum of its advances, and a font that pulls a glyph back takes the width off the rest of
-/// the word too. The strip the object leaves is the row's only span, so the word is measured
-/// against it; without the glyph pulled back the word is wider than the strip and is split
-/// across it, as Word splits a word too wide for the only strip beside a floating object.
+/// A word that a negative advance makes narrower still fits the strip beside a float: a font that
+/// pulls a glyph back gives that glyph a negative advance, which takes the width off the rest of
+/// the word too, so the word's advances add up to less and its line fits the strip the object
+/// leaves, the row's only span. Without the glyph pulled back the word is wider than the strip and
+/// is split across it, as Word splits a word too wide for the only strip beside a floating object.
 #[test]
 fn a_word_a_negative_advance_narrows_still_fits() {
     use wordcraft_doc::para::{Anchor, Float, ShapeKind, Wrap};
@@ -654,6 +654,21 @@ fn a_word_a_negative_advance_narrows_still_fits() {
     let plain = width(&word(0.0));
     let pulled = width(&word(-30.0));
     assert!(pulled < plain, "a font that pulls a glyph back makes the word narrower: {pulled} against {plain}");
+    let advances = |d: &Document| {
+        let l = lay(d);
+        body(&l).clusters.iter().map(|c| (c.start, c.adv)).collect::<Vec<_>>()
+    };
+    let (plain_advs, pulled_advs) = (advances(&word(0.0)), advances(&word(-30.0)));
+    let sixth = |advs: &[(usize, f32)]| advs.iter().find(|(start, _)| *start == 5).map(|(_, adv)| *adv);
+    let (Some(plain_sixth), Some(pulled_sixth)) = (sixth(&plain_advs), sixth(&pulled_advs)) else {
+        panic!("no cluster for the sixth character: {plain_advs:?} {pulled_advs:?}")
+    };
+    assert!(pulled_sixth < 0.0, "the glyph pulled back by thirty points has a negative advance: {pulled_sixth}");
+    assert!((plain_sixth - pulled_sixth - 30.0).abs() <= 0.01, "the glyph is pulled back by thirty points: {plain_sixth} → {pulled_sixth}");
+    let total = |advs: &[(usize, f32)]| advs.iter().map(|(_, adv)| adv).sum::<f32>();
+    let (plain_total, pulled_total) = (total(&plain_advs), total(&pulled_advs));
+    assert!((plain_total - pulled_total - 30.0).abs() <= 0.01, "the word's advances add up to thirty points less: {plain_total} → {pulled_total}");
+    assert!((plain - pulled - 30.0).abs() <= 0.01, "the word's last glyph ends thirty points sooner: {plain} → {pulled}");
     // The strip the object leaves is half way between the two widths: the word fits it with the
     // glyph pulled back, and does not fit it without.
     let strip = (plain + pulled) / 2.0;
@@ -743,11 +758,11 @@ fn long_word_beside_a_float_in_the_middle(n: usize) -> Document {
     d
 }
 
-/// A word moving down the rows a floating object splits is tried in every span of every row
-/// beside it, and each try costs the span it is tried in, not the rest of the word: the layout
-/// stays linear in the word's length. The word is 5,000 characters (and 40,000), a few pages, so
-/// that what the layout does once per page for the paragraph stays out of the ratio and the line
-/// breaking is what is timed.
+/// A timing smoke test for a long word moving down the rows a floating object splits: the word
+/// moves on below the object, and eight times the word costs well under 24 times the time. The
+/// word is 5,000 characters (and 40,000), a few pages, so that what the layout does once per page
+/// for the paragraph stays out of the ratio. The object is as tall at both lengths, so the word is
+/// tried in as many spans at both: the ratio does not show what one of those tries costs.
 #[test]
 fn a_long_unbreakable_word_moving_down_a_split_row_lays_out_in_linear_time() {
     let l = lay(&long_word_beside_a_float_in_the_middle(2_000));
@@ -761,8 +776,8 @@ fn a_long_unbreakable_word_moving_down_a_split_row_lays_out_in_linear_time() {
     assert!(ratio < 24.0, "8x the word took {ratio:.1}x the time ({t1:.4} s → {tk:.4} s): not linear");
 }
 
-/// A megabyte-long word moving down the rows a floating object splits lays out in a fraction of
-/// a second, as it does beside an object that leaves a single strip.
+/// A timing smoke test: a megabyte-long word moving down the rows a floating object splits lays
+/// out within the budget a megabyte-long word beside a single strip has.
 #[test]
 fn a_megabyte_long_word_moving_down_a_split_row_lays_out_quickly() {
     let d = long_word_beside_a_float_in_the_middle(1_000_000);
