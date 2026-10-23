@@ -1762,3 +1762,156 @@ fn a_line_steps_at_most_2000_rows_below_shapes_wrapped_through() {
     let zzz = top(&lay(&d), 0, 0);
     assert!((zzz - 2560.0).abs() < 0.02, "ZZZ at {zzz}");
 }
+
+/// A floating table whose text before, laid out again around it, runs on into a narrower column
+/// of the same page: there the table (as wide as its column) would be laid out too tall for the
+/// page and run in the text. It stays where it was placed, as wide as the first column, where it
+/// stands with text before it that fits that column, and the text before is left as it was (37
+/// lines of 17 pt from the first column's top), as when that text no longer fits the page.
+#[test]
+fn a_floating_table_stays_put_when_its_text_before_runs_into_a_narrower_column() {
+    let mut t = Table::new(1, 1, 400.0);
+    t.props.width = None;
+    t.props.width_pct = Some(100.0);
+    t.rows[0].cells[0].props.width = None;
+    let words = (0..200).map(|i| format!("w{i}")).collect::<Vec<_>>().join(" ");
+    t.rows[0].cells[0].blocks = vec![wordcraft_doc::para_block(Paragraph::with_text(&words, Default::default()))];
+    t.props.float = Some(TableFloat { h_rel: Anchor::Margin, ..on_page(150.0) });
+    let doc = |n: usize| {
+        let text: Vec<String> = (0..n).map(|i| format!("P{i}")).collect();
+        let mut d = exact_text(&text.join("\n"));
+        d.last_section.columns =
+            wordcraft_doc::section::Columns { count: 2, space: 18.0, separator: false, widths: vec![(400.0, 18.0), (50.0, 0.0)] };
+        d.insert_block(StoryRef::Body, &Path::top(n), Block::Table(t.clone())).unwrap();
+        lay(&d)
+    };
+    let fits = table_rect(&doc(10), 0, 10).unwrap();
+    assert!((fits.y - 150.0).abs() < 0.01 && fits.w > 399.0 && fits.w < 401.0, "{fits:?}");
+    let n = 37usize;
+    let l = doc(n);
+    assert_eq!(l.pages.len(), 1);
+    let table = table_rect(&l, 0, n as u32).unwrap();
+    assert!(
+        (table.x - fits.x).abs() < 0.01 && (table.y - 150.0).abs() < 0.01 && (table.w - fits.w).abs() < 0.01,
+        "{table:?}, with less text before {fits:?}"
+    );
+    let at: Vec<(f32, f32)> = (0..n as u32).map(|b| lines(&l, 0, b).map_or((f32::NAN, f32::NAN), |(t, _, x)| (t, x))).collect();
+    assert!(at.iter().enumerate().all(|(i, (t, x))| (t - (72.0 + 17.0 * i as f32)).abs() < 0.01 && (x - 72.0).abs() < 0.01), "{at:?}");
+}
+
+/// Word (Word 2007 layout, Calibri 11 pt on a 24 pt line grid, `lines` or `linesAndChars`): a line
+/// that snaps to the grid keeps its whole snapped line clear of a full-width floating table or
+/// square-wrapped shape, before or after the float's anchor: its third line, 120 to 144 pt with
+/// single spacing (or to 147.6, 27.6 pt, with 1.15), moves below a shape whose top lands 23.75 pt
+/// into it (27.5 with 1.15) and stays for one at its bottom (here 0.05 pt below it). Here in [`TEST_FONT`], whose own line
+/// (15.9 pt, 18.3 with 1.15) is shorter than the snapped one, swept through the snapped line of a
+/// layout without the float.
+#[test]
+fn a_line_on_a_line_grid_keeps_its_snapped_height_clear_of_a_float() {
+    use wordcraft_doc::props::LineSpacing;
+    use wordcraft_doc::section::{DocGrid, DocGridType};
+    let text_8 = (1..=8).map(|i| format!("P{i} word")).collect::<Vec<_>>().join("\n");
+    let square = |y: f32| Float { wrap: Wrap::Square, h_rel: Anchor::Page, v_rel: Anchor::Page, y, ..Default::default() };
+    let on_grid = |mut d: Document, m: f32| {
+        d.settings.compat_mode = wordcraft_doc::LEGACY_COMPAT_MODE;
+        d.last_section.doc_grid = Some(DocGrid { kind: DocGridType::Lines, line_pitch: 24.0, char_space: 0 });
+        for b in &mut d.body {
+            if let Block::Para(p) = Arc::make_mut(b) {
+                p.props.line_spacing = Some(LineSpacing::Multiple(m));
+            }
+        }
+        d
+    };
+    for m in [1.0, 1.15] {
+        let plain = lay(&on_grid(exact_text(&text_8), m));
+        let (top, bottom, _) = lines(&plain, 0, 2).unwrap();
+        assert!((bottom - top - 24.0 * m).abs() < 0.01 && (top - (72.0 + 48.0 * m)).abs() < 0.01, "{m}: the third line {top}–{bottom}");
+        let steps = ((bottom - top) as usize).saturating_sub(1);
+        for float_first in [false, true] {
+            for table in [true, false] {
+                for y in (0..=steps).map(|k| top + 0.5 + k as f32).chain([bottom + 0.05]) {
+                    if table && y >= bottom {
+                        continue;
+                    }
+                    let d = match (table, float_first) {
+                        (true, first) => doc_with_table(&text_8, if first { 0 } else { 5 }, float_table(612.0, 50.0, on_page(y))),
+                        (false, first) => doc_with_shape(&text_8, if first { 0 } else { 5 }, 612.0, 50.0, square(y)),
+                    };
+                    let l = lay(&on_grid(d, m));
+                    let float = if table { table_rect(&l, 0, if float_first { 0 } else { 5 }) } else { shapes(&l.pages[0].items).first().copied() };
+                    let case = format!("{m} lines, float first {float_first}, table {table}, y {y}");
+                    let float = float.unwrap_or_else(|| panic!("{case}: no float"));
+                    let third = lines(&l, 0, if table && float_first { 3 } else { 2 }).unwrap();
+                    if y < bottom {
+                        assert!(third.0 >= float.bottom() - 0.01, "{case}: the third line at {third:?}, the float ends at {}", float.bottom());
+                    } else {
+                        assert!((third.0 - top).abs() < 0.01, "{case}: the third line stays at {third:?}");
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Word (Word 2013 layout, Calibri 11 pt on a 24 pt line grid, `lines` or `linesAndChars`, single
+/// and 1.15 spacing, tables and square-wrapped shapes, before and after the float's anchor): a
+/// line on the grid keeps only its text clear of a float below it, the text centred in the
+/// snapped line (13.43 pt in 24, so to 18.7 pt from the line's top; 20.5 in 27.6 with 1.15):
+/// the third line moves below a shape whose top lands 18.5 pt into it and stays for one 18.75
+/// pt in (20.25 and 20.5 with 1.15). Here in [`TEST_FONT`], the text's bottom taken from a layout
+/// without the float; before Word 2013 layout the whole snapped line counts
+/// ([`a_line_on_a_line_grid_keeps_its_snapped_height_clear_of_a_float`]).
+#[test]
+fn in_word_2013_layout_a_line_on_a_line_grid_keeps_its_text_clear_of_a_float() {
+    use wordcraft_doc::props::LineSpacing;
+    use wordcraft_doc::section::{DocGrid, DocGridType};
+    let text_8 = (1..=8).map(|i| format!("P{i} word")).collect::<Vec<_>>().join("\n");
+    let square = |y: f32| Float { wrap: Wrap::Square, h_rel: Anchor::Page, v_rel: Anchor::Page, y, ..Default::default() };
+    let on_grid = |mut d: Document, m: f32| {
+        d.settings.compat_mode = 15;
+        d.last_section.doc_grid = Some(DocGrid { kind: DocGridType::Lines, line_pitch: 24.0, char_space: 0 });
+        for b in &mut d.body {
+            if let Block::Para(p) = Arc::make_mut(b) {
+                p.props.line_spacing = Some(LineSpacing::Multiple(m));
+            }
+        }
+        d
+    };
+    let text_bottom = |l: &DocLayout, block: u32| {
+        l.pages[0].items.iter().find_map(|it| match it {
+            Placed::Lines { story: StoryRef::Body, path, para, l0, y, .. } if path.0 == [block] => {
+                para.lines.get(*l0).map(|ln| y + ln.baseline - ln.top + ln.text_desc)
+            }
+            _ => None,
+        })
+    };
+    for m in [1.0, 1.15] {
+        let plain = lay(&on_grid(exact_text(&text_8), m));
+        let (top, bottom, _) = lines(&plain, 0, 2).unwrap();
+        let text = text_bottom(&plain, 2).unwrap();
+        assert!(text > top + 15.0 && text < bottom - 2.0, "{m}: the third line {top}–{bottom}, its text to {text}");
+        for float_first in [false, true] {
+            for table in [true, false] {
+                let below_text = ((text - top) as usize).saturating_sub(1);
+                for (y, moves) in
+                    (0..=below_text).map(|k| (top + 0.5 + k as f32, true)).chain([(text - 0.25, true), (text + 0.05, false), (bottom - 0.5, false)])
+                {
+                    let d = match (table, float_first) {
+                        (true, first) => doc_with_table(&text_8, if first { 0 } else { 5 }, float_table(612.0, 50.0, on_page(y))),
+                        (false, first) => doc_with_shape(&text_8, if first { 0 } else { 5 }, 612.0, 50.0, square(y)),
+                    };
+                    let l = lay(&on_grid(d, m));
+                    let float = if table { table_rect(&l, 0, if float_first { 0 } else { 5 }) } else { shapes(&l.pages[0].items).first().copied() };
+                    let case = format!("{m} lines, float first {float_first}, table {table}, y {y} (text to {text})");
+                    let float = float.unwrap_or_else(|| panic!("{case}: no float"));
+                    let third = lines(&l, 0, if table && float_first { 3 } else { 2 }).unwrap();
+                    if moves {
+                        assert!(third.0 >= float.bottom() - 0.01, "{case}: the third line at {third:?}, the float ends at {}", float.bottom());
+                    } else {
+                        assert!((third.0 - top).abs() < 0.01, "{case}: the third line stays at {third:?}");
+                    }
+                }
+            }
+        }
+    }
+}
