@@ -3818,6 +3818,7 @@ fn place_para_in_flow(ctx: &mut Ctx, pb: &mut PageBuilder, p: &Paragraph, block:
     let mut wrap_before = space_before;
     // The page the floating objects were placed on (by index).
     let mut float_page = pb.pages.len().saturating_sub(1);
+    let mut placed_first: Option<(usize, HashMap<usize, Rect>)> = None;
     // The page its fields were laid out for (and the width), and how many times it was laid out again for a later
     // page (bounded: a paragraph over hundreds of pages keeps the last number it got).
     let (mut laid_page, mut laid_width) = (pb.number, pb.col_w());
@@ -4220,8 +4221,9 @@ fn place_para_in_flow(ctx: &mut Ctx, pb: &mut PageBuilder, p: &Paragraph, block:
                         again(ctx, eq_start, |ctx| anchor_floats(ctx, pb, p, block, y0, 0.0, excl_mark, (&label, wrap_after), false))
                     });
                     if let Some(k) = relaid.lines.iter().position(|l| l.start == resume) {
-                        (float_rects, pl, rel) = (rects, relaid, relaid_rel);
-                        float_page = pb.pages.len().saturating_sub(1);
+                        let first = std::mem::replace(&mut float_rects, rects);
+                        placed_first.get_or_insert((float_page, first));
+                        (pl, rel) = (relaid, relaid_rel);
                         wrap_before = 0.0;
                         (laid_page, laid_width) = (pb.number, pb.col_w());
                         anchor_y = y0;
@@ -4240,6 +4242,7 @@ fn place_para_in_flow(ctx: &mut Ctx, pb: &mut PageBuilder, p: &Paragraph, block:
     let (bottom_room, space_after) = if pb.after_break_mark { (0.0, 0.0) } else { (bottom_room, pl.rp.space_after) };
     pb.y += bottom_room + space_after;
     pb.prev = Some((pl.rp.style.clone(), pl.rp.contextual_spacing, space_after, pl.rp.after_auto, label.is_some()));
+    let (float_page, float_rects) = placed_first.unwrap_or((float_page, float_rects));
     float_before::PlacedFloat::of_para(ctx, p, block, float_page, &float_rects)
 }
 
@@ -4703,9 +4706,9 @@ fn header_table_areas(ctx: &mut Ctx, pb: &PageBuilder) -> Vec<Rect> {
 }
 
 /// Place floating table `tl` (`w:tblpPr`): at its own position (or at `at`, its position before
-/// the text in front of it was laid out again around it, with its wrap area already on the page),
-/// which takes no room in the text flow; the text on its page wraps around it (see
-/// [`float_before`] for the text before it).
+/// the text in front of it was laid out again around it, with its wrap area already on the page;
+/// not at all when it no longer comes out that size), which takes no room in the text flow; the
+/// text on its page wraps around it (see [`float_before`] for the text before it).
 #[allow(clippy::too_many_arguments)]
 fn place_floating_table(
     ctx: &mut Ctx,
@@ -4723,6 +4726,9 @@ fn place_floating_table(
     // Measured in Word: no vertical offset (`w:tblpY` 0 or left out) and no alignment puts a table
     // positioned on the page or margin where the text is, like one positioned on the paragraph.
     let v_rel = if f.y == 0.0 && f.v_align.is_none() { Anchor::Paragraph } else { f.v_rel };
+    if at.is_some_and(|r| (r.w - w).abs() > 0.01 || (r.h - h).abs() > 0.01) {
+        return None;
+    }
     for attempt in 0..2 {
         let s = pb.sect;
         let h_area = float_table_h_area(pb, f, ctx.mirror);
