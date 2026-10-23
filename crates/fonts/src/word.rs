@@ -560,6 +560,19 @@ mod tests {
         assert!(!resolve_cache().lock().unwrap_or_else(|e| e.into_inner()).1.keys().any(|k| k.0.len() > 1000));
     }
 
+    /// A font added to the database after a lookup missed it is there from then on, for
+    /// [`available`] as for [`resolve`]: their caches are dropped when fonts are added.
+    #[test]
+    fn a_font_added_after_a_lookup_is_available() {
+        const FAMILY: &str = "Availfont Ab3";
+        assert!(!available(FAMILY, true) && !available(FAMILY, false));
+        assert!(resolve(FAMILY, false, false).substituted);
+        let data = crate::fontdb::user::tests::renamed("SourceSans3-Regular.ttf", FAMILY);
+        assert!(FontDb::global().add_font(data) > 0);
+        assert!(available(FAMILY, true) && available(FAMILY, false));
+        assert!(!resolve(FAMILY, false, false).substituted);
+    }
+
     #[test]
     fn unknown_family_substitutes() {
         let r = resolve("Definitely Not A Font 123", false, false);
