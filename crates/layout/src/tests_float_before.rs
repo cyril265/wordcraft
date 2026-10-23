@@ -700,3 +700,39 @@ fn text_before_floats_is_laid_out_again_for_at_most_16_floats_on_a_page_across_s
         assert!(before >= shape.bottom() - 0.01, "section {k}: paragraph before at {before}, shape {shape:?}");
     }
 }
+
+/// A floating table whose text before, laid out again around it, runs on into a narrower column
+/// of the same page: there the table (as wide as its column) would be laid out too tall for the
+/// page and run in the text. It stays where it was placed, as wide as the first column, where it
+/// stands with text before it that fits that column, and the text before is left as it was (37
+/// lines of 17 pt from the first column's top), as when that text no longer fits the page.
+#[test]
+fn a_floating_table_stays_put_when_its_text_before_runs_into_a_narrower_column() {
+    let mut t = Table::new(1, 1, 400.0);
+    t.props.width = None;
+    t.props.width_pct = Some(100.0);
+    t.rows[0].cells[0].props.width = None;
+    let words = (0..200).map(|i| format!("w{i}")).collect::<Vec<_>>().join(" ");
+    t.rows[0].cells[0].blocks = vec![wordcraft_doc::para_block(Paragraph::with_text(&words, Default::default()))];
+    t.props.float = Some(TableFloat { h_rel: Anchor::Margin, ..on_page(150.0) });
+    let doc = |n: usize| {
+        let text: Vec<String> = (0..n).map(|i| format!("P{i}")).collect();
+        let mut d = exact_text(&text.join("\n"));
+        d.last_section.columns =
+            wordcraft_doc::section::Columns { count: 2, space: 18.0, separator: false, widths: vec![(400.0, 18.0), (50.0, 0.0)] };
+        d.insert_block(StoryRef::Body, &Path::top(n), Block::Table(t.clone())).unwrap();
+        lay(&d)
+    };
+    let fits = table_rect(&doc(10), 0, 10).unwrap();
+    assert!((fits.y - 150.0).abs() < 0.01 && fits.w > 399.0 && fits.w < 401.0, "{fits:?}");
+    let n = 37usize;
+    let l = doc(n);
+    assert_eq!(l.pages.len(), 1);
+    let table = table_rect(&l, 0, n as u32).unwrap();
+    assert!(
+        (table.x - fits.x).abs() < 0.01 && (table.y - 150.0).abs() < 0.01 && (table.w - fits.w).abs() < 0.01,
+        "{table:?}, with less text before {fits:?}"
+    );
+    let at: Vec<(f32, f32)> = (0..n as u32).map(|b| lines(&l, 0, b).map_or((f32::NAN, f32::NAN), |(t, _, x)| (t, x))).collect();
+    assert!(at.iter().enumerate().all(|(i, (t, x))| (t - (72.0 + 17.0 * i as f32)).abs() < 0.01 && (x - 72.0).abs() < 0.01), "{at:?}");
+}
