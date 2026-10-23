@@ -790,3 +790,45 @@ fn a_line_on_a_line_grid_keeps_its_snapped_height_clear_of_a_float() {
         }
     }
 }
+
+/// A paragraph whose shape stands over the paragraph before it, and that runs on across a column
+/// break into a column of another width (its text after the break laid out again for that width),
+/// still has the text before it wrap around the shape: the shape stays with the paragraph's first
+/// piece, and so does the record of where it was placed. Equal columns, where nothing is laid out
+/// again at the break, give the same.
+#[test]
+fn text_before_a_shape_wraps_around_it_when_its_paragraph_breaks_into_a_column_of_another_width() {
+    use wordcraft_doc::section::Columns;
+    let brk = wordcraft_doc::para::COLUMN_BREAK;
+    let float = Float { wrap: Wrap::TopAndBottom, h_rel: Anchor::Column, v_rel: Anchor::Paragraph, y: -10.0, ..Default::default() };
+    let laid = |widths: Vec<(f32, f32)>| {
+        let mut d = doc_with_shape(&format!("First\nBefore\nAnchor{brk}After the break\nAfter"), 2, 150.0, 100.0, float.clone());
+        d.last_section.columns = Columns { count: 2, space: 36.0, separator: false, widths };
+        lay(&d)
+    };
+    for (widths, second) in [(vec![(216.0, 36.0), (216.0, 0.0)], 72.0 + 216.0 + 36.0), (vec![(260.0, 36.0), (172.0, 0.0)], 72.0 + 260.0 + 36.0)] {
+        let l = laid(widths.clone());
+        let drawn: Vec<Rect> = l.pages.iter().flat_map(|pg| shapes(&pg.items)).collect();
+        let [shape] = drawn[..] else { panic!("{widths:?}: the shape is placed once: {drawn:?}") };
+        assert_eq!(l.pages.len(), 1, "{widths:?}");
+        assert!((top(&l, 0, 0) - 72.0).abs() < 0.5, "{widths:?}: the first paragraph stays: {}", top(&l, 0, 0));
+        let before = top(&l, 0, 1);
+        assert!(
+            before >= shape.bottom() - 0.01 && before < shape.bottom() + 17.0,
+            "{widths:?}: the paragraph before goes right below the shape: {before} {shape:?}"
+        );
+        let anchor = l.pages[0].items.iter().find_map(|it| match it {
+            Placed::Lines { story: StoryRef::Body, path, l0: 0, y, .. } if path.0 == [2] => Some(*y),
+            _ => None,
+        });
+        assert!(
+            anchor.is_some_and(|y| (y - (before + 17.0)).abs() < 0.01),
+            "{widths:?}: the shape's paragraph follows the paragraph before: {anchor:?}, {before}"
+        );
+        assert!(clear_of(&l, 0, &shape), "{widths:?}: no text under the shape {shape:?}");
+        let after_break = l.pages[0].items.iter().any(|it| {
+            matches!(it, Placed::Lines { story: StoryRef::Body, path, l0, x, para, .. } if path.0 == [2] && *l0 > 0 && (x + para.lines[*l0].left - second).abs() < 0.5)
+        });
+        assert!(after_break, "{widths:?}: the text after the break is in the second column");
+    }
+}

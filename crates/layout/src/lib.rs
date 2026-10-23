@@ -3796,6 +3796,7 @@ fn place_para_in_flow(ctx: &mut Ctx, pb: &mut PageBuilder, p: &Paragraph, block:
     let (mut float_rects, mut pl, mut rel) = anchor_floats(ctx, pb, p, block, guess, space_before, excl_mark, &label, true);
     // The page the floating objects were placed on (by index).
     let mut float_page = pb.pages.len().saturating_sub(1);
+    let mut placed_first: Option<(usize, HashMap<usize, Rect>)> = None;
     // The page its fields were laid out for (and the width), and how many times it was laid out again for a later
     // page (bounded: a paragraph over hundreds of pages keeps the last number it got).
     let (mut laid_page, mut laid_width) = (pb.number, pb.col_w());
@@ -4192,8 +4193,9 @@ fn place_para_in_flow(ctx: &mut Ctx, pb: &mut PageBuilder, p: &Paragraph, block:
                         again(ctx, eq_start, |ctx| anchor_floats(ctx, pb, p, block, y0, 0.0, excl_mark, &label, false))
                     });
                     if let Some(k) = relaid.lines.iter().position(|l| l.start == resume) {
-                        (float_rects, pl, rel) = (rects, relaid, relaid_rel);
-                        float_page = pb.pages.len().saturating_sub(1);
+                        let first = std::mem::replace(&mut float_rects, rects);
+                        placed_first.get_or_insert((float_page, first));
+                        (pl, rel) = (relaid, relaid_rel);
                         (laid_page, laid_width) = (pb.number, pb.col_w());
                         anchor_y = y0;
                         n = pl.lines.len();
@@ -4211,6 +4213,7 @@ fn place_para_in_flow(ctx: &mut Ctx, pb: &mut PageBuilder, p: &Paragraph, block:
     let (bottom_room, space_after) = if pb.after_break_mark { (0.0, 0.0) } else { (bottom_room, pl.rp.space_after) };
     pb.y += bottom_room + space_after;
     pb.prev = Some((pl.rp.style.clone(), pl.rp.contextual_spacing, space_after, pl.rp.after_auto, label.is_some()));
+    let (float_page, float_rects) = placed_first.unwrap_or((float_page, float_rects));
     float_before::PlacedFloat::of_para(ctx, p, block, float_page, &float_rects)
 }
 
