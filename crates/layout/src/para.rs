@@ -2041,9 +2041,11 @@ fn break_lines(pl: &mut ParaLayout, env: &ParaEnv, mark_style: u32, level: Optio
     let mut top = 0.0f32;
     let mut first = true;
     let natural = pl.styles.get(mark_style as usize).map(|st| st.ascent + st.descent);
+    let snap = |h: f32| grid.map_or(h, |g| g.snap_height(h));
     let est_h = match rp.line_spacing {
-        LineSpacing::Multiple(m) => natural.map_or(14.0, |h| h * m),
-        LineSpacing::AtLeast(v) | LineSpacing::Exactly(v) => natural.unwrap_or(14.0).max(v),
+        LineSpacing::Multiple(m) => natural.map_or(14.0, |h| snap(h) * m),
+        LineSpacing::AtLeast(v) => snap(natural.unwrap_or(14.0)).max(v),
+        LineSpacing::Exactly(v) => natural.unwrap_or(14.0).max(v),
     }
     .max(1.0);
     // The rest of the current row: spans on the far side of floating objects, left to right.
