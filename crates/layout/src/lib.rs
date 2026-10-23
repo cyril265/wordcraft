@@ -4659,9 +4659,9 @@ fn header_table_areas(ctx: &mut Ctx, pb: &PageBuilder) -> Vec<Rect> {
 }
 
 /// Place floating table `tl` (`w:tblpPr`): at its own position (or at `at`, its position before
-/// the text in front of it was laid out again around it, with its wrap area already on the page),
-/// which takes no room in the text flow; the text on its page wraps around it (see
-/// [`float_before`] for the text before it).
+/// the text in front of it was laid out again around it, with its wrap area already on the page;
+/// not at all when it no longer comes out that size), which takes no room in the text flow; the
+/// text on its page wraps around it (see [`float_before`] for the text before it).
 #[allow(clippy::too_many_arguments)]
 fn place_floating_table(
     ctx: &mut Ctx,
@@ -4679,6 +4679,9 @@ fn place_floating_table(
     // Measured in Word: no vertical offset (`w:tblpY` 0 or left out) and no alignment puts a table
     // positioned on the page or margin where the text is, like one positioned on the paragraph.
     let v_rel = if f.y == 0.0 && f.v_align.is_none() { Anchor::Paragraph } else { f.v_rel };
+    if at.is_some_and(|r| (r.w - w).abs() > 0.01 || (r.h - h).abs() > 0.01) {
+        return None;
+    }
     for attempt in 0..2 {
         let s = pb.sect;
         let h_area = float_table_h_area(pb, f, ctx.mirror);

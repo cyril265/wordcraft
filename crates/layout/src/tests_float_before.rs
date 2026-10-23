@@ -737,6 +737,44 @@ fn a_floating_table_stays_put_when_its_text_before_runs_into_a_narrower_column()
     assert!(at.iter().enumerate().all(|(i, (t, x))| (t - (72.0 + 17.0 * i as f32)).abs() < 0.01 && (x - 72.0).abs() < 0.01), "{at:?}");
 }
 
+/// A floating table whose text before, laid out again around it, runs on into a narrower column
+/// of the same page, where the table (as wide as its column) comes out taller but still fits the
+/// page: placed at the rectangle it had, its rows would be the narrower, taller ones and the text
+/// before would wrap around the smaller area it left. It stays where and as it was placed, and the
+/// text before is left as it was, as when the table is too tall for the page there.
+#[test]
+fn a_floating_table_that_comes_out_taller_in_a_narrower_column_stays_as_it_was_placed() {
+    let mut t = Table::new(1, 1, 300.0);
+    t.props.width = None;
+    t.props.width_pct = Some(100.0);
+    t.rows[0].cells[0].props.width = None;
+    let words = (0..40).map(|i| format!("w{i}")).collect::<Vec<_>>().join(" ");
+    t.rows[0].cells[0].blocks = vec![wordcraft_doc::para_block(Paragraph::with_text(&words, Default::default()))];
+    t.props.float = Some(TableFloat { h_rel: Anchor::Margin, ..on_page(150.0) });
+    let doc = |n: usize, widths: Vec<(f32, f32)>| {
+        let text: Vec<String> = (0..n).map(|i| format!("P{i}")).collect();
+        let mut d = exact_text(&text.join("\n"));
+        d.last_section.columns = wordcraft_doc::section::Columns { count: 2, space: 18.0, separator: false, widths };
+        d.insert_block(StoryRef::Body, &Path::top(n), Block::Table(t.clone())).unwrap();
+        lay(&d)
+    };
+    let columns = vec![(300.0, 18.0), (150.0, 0.0)];
+    let fits = table_rect(&doc(10, columns.clone()), 0, 10).unwrap();
+    assert!((fits.y - 150.0).abs() < 0.01 && fits.w > 299.0 && fits.w < 301.0, "{fits:?}");
+    let narrow = table_rect(&doc(10, vec![(150.0, 18.0), (300.0, 0.0)]), 0, 10).unwrap();
+    assert!(narrow.h > fits.h + 17.0 && narrow.bottom() < 720.0, "taller in the narrower column, and on the page: {narrow:?}, {fits:?}");
+    let n = 37usize;
+    let l = doc(n, columns);
+    assert_eq!(l.pages.len(), 1);
+    let table = table_rect(&l, 0, n as u32).unwrap();
+    assert!(
+        (table.x - fits.x).abs() < 0.01 && (table.y - fits.y).abs() < 0.01 && (table.w - fits.w).abs() < 0.01 && (table.h - fits.h).abs() < 0.01,
+        "{table:?}, with less text before {fits:?}"
+    );
+    let at: Vec<(f32, f32)> = (0..n as u32).map(|b| lines(&l, 0, b).map_or((f32::NAN, f32::NAN), |(t, _, x)| (t, x))).collect();
+    assert!(at.iter().enumerate().all(|(i, (t, x))| (t - (72.0 + 17.0 * i as f32)).abs() < 0.01 && (x - 72.0).abs() < 0.01), "{at:?}");
+}
+
 /// Word (Word 2007 layout, Calibri 11 pt on a 24 pt line grid, `lines` or `linesAndChars`): a line
 /// that snaps to the grid keeps its whole snapped line clear of a full-width floating table or
 /// square-wrapped shape, before or after the float's anchor: its third line, 120 to 144 pt with
