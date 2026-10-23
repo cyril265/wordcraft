@@ -456,3 +456,109 @@ fn a_text_box_turned_half_round_keeps_its_picture_upright() {
     ];
     assert_eq!(drawn(&mut s), want);
 }
+
+/// The text box filled with a picture (cyan under a picture that may be transparent) at 100, 100
+/// and a red rectangle at 100, 300, both 200 × 100 pt on the page, anchored in one paragraph.
+fn text_box_and_rectangle() -> Session {
+    let style = "margin-left:100pt;margin-top:100pt;width:200pt;height:100pt";
+    let red = rect(&format!("margin-left:100pt;margin-top:300pt;width:200pt;height:100pt;{PAGE}"), r##"fillcolor="#ff0000""##, "");
+    let runs = text_box(style, r##"fillcolor="#00ffff""##, "TEXTINBOX") + &red;
+    open_with(&(para("ANCHOR", &runs) + &para("END", "")), None, &png(6))
+}
+
+/// Run command `id` with `params`.
+fn run(s: &mut Session, id: &str, params: serde_json::Value) -> Result<serde_json::Value, wordcraft_engine::CmdError> {
+    s.run(id, &params)
+}
+
+/// The objects at these offsets of the first paragraph, selected together.
+fn select_objects(s: &mut Session, offs: &[usize]) {
+    let objects: Vec<_> = offs.iter().map(|o| serde_json::to_value(wordcraft_doc::Pos::body(0, *o)).unwrap()).collect();
+    run(s, "select.addObject", serde_json::json!({ "objects": objects })).unwrap();
+}
+
+/// What page 1 shows, in no particular order (a group draws its text boxes' text after its
+/// members).
+fn shown(s: &mut Session) -> Vec<String> {
+    let mut d: Vec<String> = drawn(s).iter().map(|d| format!("{d:?}")).collect();
+    d.sort();
+    d
+}
+
+/// A click anywhere in the group at 100, 100, 200 × 300 pt on page 1, the former text box
+/// included, takes the whole group.
+fn group_taken_whole(s: &mut Session, what: &str) {
+    let l = s.layout();
+    for (x, y) in [(120.0, 110.0), (200.0, 150.0), (200.0, 350.0)] {
+        let hit = l.object_at(0, x, y, 3.0).unwrap_or_else(|| panic!("{what}: nothing at {x}, {y}"));
+        assert_eq!((hit.rect, hit.text_box), (Rect::new(100.0, 100.0, 200.0, 300.0), None), "{what}: at {x}, {y}");
+    }
+}
+
+/// Grouped with another shape (Layout › Arrange › Group), a text box filled with a picture is a
+/// member as any text box is on `main` (where it is read without its picture): its layers join
+/// the new group, an ordinary one drawn as before, which a click anywhere in takes whole, also
+/// saved and reopened. Undone, it is the text box filled with a picture again, clicked into;
+/// redone, the group.
+#[test]
+fn grouped_with_a_shape_a_text_box_filled_with_a_picture_is_a_member() {
+    let mut s = text_box_and_rectangle();
+    let before = shown(&mut s);
+    assert_eq!(picture_fills(&s), [true]);
+    select_objects(&mut s, &[0, 3]);
+    run(&mut s, "arrange.group", serde_json::json!({})).unwrap();
+    assert_eq!(picture_fills(&s), [false]);
+    let members = groups(&s).first().map(|o| match o {
+        InlineObject::Group { children, .. } => children.len(),
+        _ => 0,
+    });
+    assert_eq!(members, Some(4), "the fill colour, the picture, the text box and the rectangle");
+    assert_eq!(shown(&mut s), before, "drawn as before");
+    group_taken_whole(&mut s, "grouped");
+    let mut back = reopened(&s);
+    assert_eq!(picture_fills(&back), [false]);
+    assert_eq!(shown(&mut back), before, "saved");
+    group_taken_whole(&mut back, "saved");
+    run(&mut s, "edit.undo", serde_json::json!({})).unwrap();
+    assert_eq!(picture_fills(&s), [true], "undone");
+    assert_eq!(shown(&mut s), before, "undone");
+    clicked_into(&mut s, false, "undone");
+    run(&mut s, "edit.redo", serde_json::json!({})).unwrap();
+    assert_eq!(picture_fills(&s), [false], "redone");
+    group_taken_whole(&mut s, "redone");
+}
+
+/// A text box filled with a picture is one shape, as on `main` and in Word: Ungroup is greyed
+/// out for it and refused, so it stays whole and clicked into, also saved and reopened. (Its
+/// layers apart, a click inside the text box would take the picture under it.)
+#[test]
+fn a_text_box_filled_with_a_picture_cant_be_ungrouped() {
+    let mut s = text_box_and_rectangle();
+    select_objects(&mut s, &[0]);
+    assert_eq!(s.why_disabled("arrange.ungroup"), Some("a shape filled with a picture is one shape: it can't be ungrouped"));
+    let err = run(&mut s, "arrange.ungroup", serde_json::json!({})).unwrap_err();
+    assert!(matches!(err, wordcraft_engine::CmdError::Disabled(_)), "{err:?}");
+    assert_eq!(picture_fills(&s), [true]);
+    assert_eq!(s.doc.body.first().and_then(|b| b.as_para()).map(|p| p.objects.len()), Some(2));
+    clicked_into(&mut s, false, "not ungrouped");
+    let mut back = reopened(&s);
+    select_objects(&mut back, &[0]);
+    assert!(back.why_disabled("arrange.ungroup").is_some(), "saved");
+    clicked_into(&mut back, false, "saved");
+}
+
+/// A group made from it with another shape is an ordinary group: Ungroup splits it into its
+/// members, drawn as before (the text box's layers as three objects).
+#[test]
+fn a_group_made_with_a_text_box_filled_with_a_picture_ungroups_into_its_members() {
+    let mut s = text_box_and_rectangle();
+    let before = shown(&mut s);
+    select_objects(&mut s, &[0, 3]);
+    run(&mut s, "arrange.group", serde_json::json!({})).unwrap();
+    assert_eq!(s.why_disabled("arrange.ungroup"), None);
+    run(&mut s, "arrange.ungroup", serde_json::json!({})).unwrap();
+    assert!(groups(&s).is_empty());
+    assert_eq!(shown(&mut s), before, "drawn as before");
+    run(&mut s, "edit.undo", serde_json::json!({})).unwrap();
+    assert_eq!(picture_fills(&s), [false], "undone: the group");
+}

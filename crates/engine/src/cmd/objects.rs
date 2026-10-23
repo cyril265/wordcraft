@@ -64,10 +64,15 @@ const INK_GROUP: &str = "a group holding Word ink can't be ungrouped yet";
 fn holds_ink(o: &InlineObject) -> bool {
     matches!(o, InlineObject::Group { children, .. } if children.iter().any(|c| matches!(&c.obj, InlineObject::Graphic { graphic, .. } if graphic.kind == GraphicKind::Ink)))
 }
+/// A VML rectangle or text box filled with a picture is read as a group of its layers, but it is
+/// one shape, as Word has it: there is nothing to ungroup (its text box, on its own over the
+/// picture, would no longer take clicks inside it).
+const PICTURE_FILL_GROUP: &str = "a shape filled with a picture is one shape: it can't be ungrouped";
 fn has_group(s: &Session) -> Option<&'static str> {
     match selected(s) {
         Some((_, o)) if o.is_canvas() => Some("a drawing canvas can't be ungrouped"),
         Some((_, o)) if holds_ink(&o) => Some(INK_GROUP),
+        Some((_, InlineObject::Group { picture_fill: true, .. })) => Some(PICTURE_FILL_GROUP),
         Some((_, InlineObject::Group { .. })) => None,
         _ => Some("select a group first"),
     }
@@ -1608,6 +1613,9 @@ fn ungroup(s: &mut Session, _: &Value) -> CmdResult {
     let InlineObject::Group { w, h, float, .. } = &obj else { return Err(CmdError::Disabled("select a group first".into())) };
     if holds_ink(&obj) {
         return Err(CmdError::Disabled(INK_GROUP.into()));
+    }
+    if matches!(obj, InlineObject::Group { picture_fill: true, .. }) {
+        return Err(CmdError::Disabled(PICTURE_FILL_GROUP.into()));
     }
     // Its offsets, explicit: the members are placed from the same anchor.
     let pos = if float.wrap == Wrap::Inline {
