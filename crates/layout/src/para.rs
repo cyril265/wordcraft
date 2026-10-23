@@ -2015,6 +2015,7 @@ fn break_lines(pl: &mut ParaLayout, env: &ParaEnv, mark_style: u32, level: Optio
     let grid = Some(env.grid).filter(|g| g.line.is_some() && rp.snap_to_grid);
     let grid = grid.as_ref();
     let natural_clear = grid.is_none() && env.doc.settings.compat_mode >= wordcraft_doc::COMPAT_MODE_CURRENT;
+    let centred_clear = grid.is_some() && env.doc.settings.compat_mode >= wordcraft_doc::COMPAT_MODE_CURRENT;
     let bidi = rtl_para || !pl.bidi_levels.is_empty();
     let mirrored: Vec<Exclusion>;
     let exclusions: &[Exclusion] = if rtl_para {
@@ -2057,6 +2058,7 @@ fn break_lines(pl: &mut ParaLayout, env: &ParaEnv, mark_style: u32, level: Optio
     .max(1.0);
     let est_clear = match rp.line_spacing {
         LineSpacing::Multiple(m) if natural_clear && m > 1.0 => (est_h / m).max(1.0),
+        LineSpacing::Multiple(_) if centred_clear => natural.map_or(est_h, |n| (((est_h - n) / 2.0).max(0.0) + n).min(est_h)).max(1.0),
         _ => est_h,
     };
     // The rest of the current row: spans on the far side of floating objects, left to right.
@@ -2525,6 +2527,7 @@ fn break_lines(pl: &mut ParaLayout, env: &ParaEnv, mark_style: u32, level: Optio
         let slack = right_edge - content_end;
         let clear = match rp.line_spacing {
             LineSpacing::Multiple(_) if natural_clear => (text_natural + label_extra).max(if text { text_pictures } else { obj_asc }).min(height),
+            LineSpacing::Multiple(_) if centred_clear => (baseline - top + desc).min(height),
             LineSpacing::Multiple(_) if grid.is_none() && !text && obj_asc > 0.0 => {
                 let wrapped = slack < -0.01 && c1 > c0 && pl.clusters.get(c1 - 1).is_some_and(|c| c.kind == ClKind::Space);
                 let mark = if j >= n && !wrapped { pl.styles.get(mark_style as usize).map_or(0.0, |s| s.descent) } else { 0.0 };
