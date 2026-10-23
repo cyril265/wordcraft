@@ -277,7 +277,7 @@ pub(crate) fn wrap_text_before<'a>(
         let again = place_block(ctx, pb, block, &floats, body_top);
         pb.fixed_objects.clear();
         // ... and so does the block itself, with its floating objects.
-        if is_table(ctx.doc, block) || again.as_ref().is_some_and(|f| f.page == page) {
+        if again.as_ref().is_some_and(|f| f.page == page) {
             blocks.floats.retain(|f| f.block != block);
             blocks.floats.extend(again);
             return thrown;
