@@ -576,12 +576,12 @@ fn rectangles_and_text_box(n: usize) -> Session {
     open_with(&(para("ANCHOR", &runs) + &para("END", "")), None, &png(6))
 }
 
-/// Group (Layout › Arrange › Group) makes a group of at most `MAX_GROUP_CHILDREN` members, a
-/// group among the objects counting its members: 997 rectangles and a text box filled with a
-/// picture (its three layers) make one, 998 are refused and leave both as they were, the text
-/// box still clicked into, rather than a group without the members past the limit.
+/// A text box filled with a picture counts as its three layers against the
+/// `MAX_GROUP_CHILDREN` members Group (Layout › Arrange › Group) makes a group of: 997
+/// rectangles and the text box make one, 998 are refused and leave both as they were, the text
+/// box still clicked into.
 #[test]
-fn group_refuses_more_members_than_a_group_keeps() {
+fn group_counts_a_picture_filled_text_box_as_its_layers() {
     let limit = wordcraft_doc::para::MAX_GROUP_CHILDREN;
     let mut s = rectangles_and_text_box(limit - 3);
     select_objects(&mut s, &[0, 3]);

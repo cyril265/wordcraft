@@ -64,9 +64,6 @@ const INK_GROUP: &str = "a group holding Word ink can't be ungrouped yet";
 fn holds_ink(o: &InlineObject) -> bool {
     matches!(o, InlineObject::Group { children, .. } if children.iter().any(|c| matches!(&c.obj, InlineObject::Graphic { graphic, .. } if graphic.kind == GraphicKind::Ink)))
 }
-/// A group keeps at most [`wordcraft_doc::para::MAX_GROUP_CHILDREN`] members; Group refuses
-/// rather than leave the members past it out (a group among the objects counts its members).
-const TOO_MANY_MEMBERS: &str = "a group holds at most 1000 pictures and shapes";
 /// A VML rectangle or text box filled with a picture is read as a group of its layers, but it is
 /// one shape, as Word has it: there is nothing to ungroup (its text box, on its own over the
 /// picture, would no longer take clicks inside it).
@@ -138,7 +135,8 @@ pub fn specs() -> Vec<CommandSpec> {
                 }
                 if sharpen > 0.0 {
                     img = img.unsharpen(1.0 + sharpen / 50.0, 2);
-                } else if sharpen < 0.0 {
+                } else if sharpen < 0.0 && (-sharpen / 25.0).is_normal() {
+                    // `blur` asserts on a subnormal width.
                     img = img.blur(-sharpen / 25.0);
                 }
                 img
@@ -1571,8 +1569,10 @@ fn group(s: &mut Session, _: &Value) -> CmdResult {
     if shown.is_empty() {
         return Err(CmdError::Failed("nothing to group".into()));
     }
+    // `shown` already has the members of any picked group merged in, so this counts the
+    // flattened members. Readers stop at the cap and would drop the rest.
     if shown.len() > wordcraft_doc::para::MAX_GROUP_CHILDREN {
-        return Err(CmdError::Disabled(TOO_MANY_MEMBERS.into()));
+        return Err(CmdError::Disabled(format!("too many objects to group (at most {})", wordcraft_doc::para::MAX_GROUP_CHILDREN)));
     }
     let (w, h) = ((x1 - x0).clamp(1.0, MAX_OFFSET), (y1 - y0).clamp(1.0, MAX_OFFSET));
     // Each member keeps its turn: the group itself starts unturned.
@@ -2024,6 +2024,17 @@ mod tests {
         assert!(s.run("picture.crop", &json!({"left": 0.1})).is_err());
     }
 
+    /// A `sharpen` too small to be a normal blur width must not reach the blur, which asserts on it.
+    #[test]
+    fn a_tiny_sharpen_value_does_not_panic() {
+        let mut s = Session::new(wordcraft_doc::Document::new());
+        let data = super::super::insert::base64_encode(&png(20, 10));
+        s.run("insert.picture", &json!({"data": data})).unwrap();
+        for sharpen in [-1e-40_f64, -1e-45, -1e-38, 1e-40, -1e-30, 0.0, -0.5] {
+            s.run("picture.corrections", &json!({"sharpen": sharpen})).unwrap_or_else(|e| panic!("sharpen {sharpen}: {e:?}"));
+        }
+    }
+
     /// Transparency is absolute from the original pixels: 80% then 0% is opaque again
     /// (it used to stay faded), and repeating a value is idempotent. Corrections and color
     /// re-set the same way: brightness 0 and saturation 100 restore the original.
@@ -2244,6 +2255,50 @@ mod tests {
         // Undo goes back step by step.
         s.run("edit.undo", &json!({})).unwrap();
         assert_eq!(all_objects(&s).len(), 2);
+    }
+
+    /// Select the objects at `at` in the list of all objects (the first as the selection, the rest added).
+    fn pick_objects(s: &mut Session, at: &[usize]) {
+        let list = all_objects(s);
+        let first = &list[at[0]].0;
+        s.sel = Selection { anchor: first.clone(), focus: Pos { off: first.off + wordcraft_doc::para::OBJ.len_utf8(), ..first.clone() } };
+        s.also_selected = at[1..].iter().map(|i| list[*i].0.clone()).collect();
+    }
+
+    #[test]
+    fn group_refuses_more_than_the_child_cap() {
+        let cap = wordcraft_doc::para::MAX_GROUP_CHILDREN;
+        let mut s = Session::new(wordcraft_doc::Document::new());
+        s.run("document.setText", &json!({"text": "one"})).unwrap();
+        s.sel = Selection::caret(s.doc.start_of(StoryRef::Body));
+        for _ in 0..=cap {
+            s.run("insert.shape", &json!({"kind": "rectangle", "width": 10, "height": 10})).unwrap();
+            s.run("arrange.bounds", &json!({"page": 0, "x": 100, "y": 100})).unwrap();
+            s.run("select.collapse", &json!({"end": true})).unwrap();
+        }
+        let n = all_objects(&s).len();
+        assert_eq!(n, cap + 1);
+
+        // Flat: every shape picked.
+        pick_objects(&mut s, &(0..n).collect::<Vec<_>>());
+        assert_eq!(picked_objects(&s).len(), n);
+        let before = s.doc.clone();
+        assert!(s.run("arrange.group", &json!({})).is_err());
+        assert_eq!(s.doc, before);
+
+        // Nested: a group of cap - 1 and a group of 2; grouping those two would hold cap + 1 members.
+        pick_objects(&mut s, &(0..cap - 1).collect::<Vec<_>>());
+        s.run("arrange.group", &json!({})).unwrap();
+        let rest = all_objects(&s).len();
+        assert_eq!(rest, 3);
+        pick_objects(&mut s, &[1, 2]);
+        s.run("arrange.group", &json!({})).unwrap();
+        assert_eq!(all_objects(&s).len(), 2);
+        pick_objects(&mut s, &[0, 1]);
+        assert_eq!(picked_objects(&s).len(), 2);
+        let before = s.doc.clone();
+        assert!(s.run("arrange.group", &json!({})).is_err());
+        assert_eq!(s.doc, before);
     }
 
     /// Page 1 as exported (`file.exportPng` at scale 1), its pixels.
