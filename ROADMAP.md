@@ -594,11 +594,11 @@ Footer page-table height and body wrapping are corrected. Other pagination gaps 
 
 | Date | Change | Summary |
 |---|---|---|
-| 2026-10-23 | trivial | Progress log: a relationship the markup names without the prefix is read as it wrote (#3411 follow-up) |
-| 2026-10-23 | trivial | Progress log: an empty paragraph with a hidden mark draws no list number (#3982) |
-| 2026-10-22 | trivial | Progress log: mail merge record navigation and record ranges for Finish & Merge and Print Documents (#3028) |
 | 2026-10-22 | trivial | Progress log: VML rectangles filled with a picture |
+| 2026-10-22 | trivial | Progress log: mail merge record navigation and record ranges for Finish & Merge and Print Documents (#3028) |
+| 2026-10-23 | trivial | Progress log: a relationship the markup names without the prefix is read as it wrote (#3411 follow-up) |
 | 2026-10-21 | trivial | Progress log: a document with many relationships opens in the time its part takes (#3411) |
+| 2026-10-23 | trivial | Progress log: an empty paragraph with a hidden mark draws no list number (#3982) |
 | 2026-10-22 | minor | Compare's new and revised untitled results clear the previous document's version snapshots; a rejected protected comparison or mailing result preserves the snapshots and file identity. |
 | 2026-10-22 | minor | The CLI author flag and the Options user name field cannot change the session name after protection starts (#3279 follow-up). |
 | 2026-10-21 | trivial | Progress log: a word with no break opportunity in it no longer makes the layout quadratic (#3412) |
