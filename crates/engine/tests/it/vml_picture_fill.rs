@@ -599,3 +599,26 @@ fn group_counts_a_picture_filled_text_box_as_its_layers() {
     assert_eq!(picture_fills(&s), [false, true]);
     clicked_into(&mut s, false, "not grouped");
 }
+
+/// Selected as an object, a text box filled with a picture takes the Font commands into all its
+/// text, as a text box without a picture does and as Word has it (one text box): the body text
+/// around it is left as it was, and Bold reads the box's text, so pressing it again takes it off.
+#[test]
+fn font_commands_on_a_selected_text_box_filled_with_a_picture_format_its_text() {
+    let mut s = text_box_and_rectangle();
+    let story = groups(&s).first().and_then(|o| o.text_boxes().first().copied()).map(StoryRef::Part).expect("its text box");
+    let runs = |s: &Session, story: StoryRef| -> Vec<wordcraft_doc::props::CharProps> {
+        s.doc.para_paths(story).iter().filter_map(|p| s.doc.para(story, p)).flat_map(|p| p.run_ranges().map(|(_, c)| c.clone())).collect()
+    };
+    select_objects(&mut s, &[0]);
+    run(&mut s, "format.font", serde_json::json!({"name": "Arial"})).unwrap();
+    run(&mut s, "format.bold", serde_json::json!({})).unwrap();
+    let boxed = runs(&s, story);
+    assert!(!boxed.is_empty());
+    assert!(boxed.iter().all(|c| c.font.as_deref() == Some("Arial") && c.bold == Some(true)), "{boxed:?}");
+    let body = runs(&s, StoryRef::Body);
+    assert!(body.iter().all(|c| c.font.is_none() && c.bold.is_none()), "{body:?}");
+    run(&mut s, "format.bold", serde_json::json!({})).unwrap();
+    assert!(runs(&s, story).iter().all(|c| c.bold == Some(false)));
+    assert_eq!(picture_fills(&s), [true]);
+}
