@@ -264,6 +264,51 @@ fn exact_and_at_least_lines_keep_their_whole_height_clear_of_a_float_before_or_a
     }
 }
 
+/// Word for Mac (exact 12 pt lines, a full-width table or square-wrapped shape whose top is at
+/// the bottom of the second line or a twip either side, compatibility modes 12 and 15): a table
+/// touching the line's bottom moves the line below it, whether the table comes before the line in
+/// the document (#3977) or after it; a shape touching it leaves it in place, and so does a table
+/// placed from the text, here one line up from where it comes in the document (the line before
+/// that, which it overlaps, moves below it). So the text before a table placed on the page is laid
+/// out again for a table touching one of its lines, and not for a shape or a table placed from the
+/// text.
+#[test]
+fn a_floating_table_touching_the_bottom_of_a_line_before_it_moves_that_line_below_it() {
+    let text = "P1\nP2\nP3\nP4";
+    let square = |y: f32| Float { wrap: Wrap::Square, h_rel: Anchor::Page, v_rel: Anchor::Page, y, ..Default::default() };
+    for mode in [11, 12, 14, 15] {
+        for twips in [-1, 0, 1] {
+            let y = 106.0 + twips as f32 / 20.0;
+            for (case, at) in [("table first", 0), ("table after", 2), ("shape", 3)] {
+                let mut d = if case == "shape" {
+                    doc_with_shape(text, at, 612.0, 50.0, square(y))
+                } else {
+                    doc_with_table(text, at, float_table(612.0, 50.0, on_page(y)))
+                };
+                d.settings.compat_mode = mode;
+                let l = lay(&d);
+                let float = if case == "shape" { shapes(&l.pages[0].items).first().copied() } else { table_rect(&l, 0, at as u32) };
+                let float = float.unwrap_or_else(|| panic!("mode {mode} {case} {twips}: no float"));
+                assert!((float.y - y).abs() < 0.001, "mode {mode} {case} {twips}: the float stays put: {float:?}");
+                let (p1, p2) = if at == 0 { (1, 2) } else { (0, 1) };
+                assert!((top(&l, 0, p1) - 72.0).abs() < 0.001, "mode {mode} {case} {twips}: P1 at {}", top(&l, 0, p1));
+                let moves = twips < 0 || (twips == 0 && case != "shape");
+                let expected = if moves { float.bottom() } else { 89.0 };
+                assert!((top(&l, 0, p2) - expected).abs() < 0.001, "mode {mode} {case} {twips}: P2 at {}, expected {expected}", top(&l, 0, p2));
+            }
+            let from_text = TableFloat { v_rel: Anchor::Paragraph, ..on_page(y - 106.0 - 17.0) };
+            let mut d = doc_with_table(text, 2, float_table(612.0, 50.0, from_text));
+            d.settings.compat_mode = mode;
+            let l = lay(&d);
+            let table = table_rect(&l, 0, 2).unwrap_or_else(|| panic!("mode {mode} from text {twips}: no table"));
+            assert!((table.y - (y - 17.0)).abs() < 0.001, "mode {mode} from text {twips}: the table stays put: {table:?}");
+            let expected = if twips < 0 { table.bottom() } else { 72.0 };
+            assert!((top(&l, 0, 0) - expected).abs() < 0.001, "mode {mode} from text {twips}: P1 at {}, expected {expected}", top(&l, 0, 0));
+            assert!(top(&l, 0, 1) >= table.bottom() - 0.001, "mode {mode} from text {twips}: P2 at {}", top(&l, 0, 1));
+        }
+    }
+}
+
 #[test]
 fn a_paragraph_before_a_narrow_floating_table_wraps_beside_it() {
     // Word: a table half the text wide at the left margin; the paragraph before it runs beside it
@@ -760,6 +805,79 @@ fn a_last_line_whose_space_after_reaches_a_floating_table_goes_below_it() {
             assert!((t - 72.0).abs() < 0.01, "after {after}, table at {y}: moved to {t}");
         } else {
             assert!(t >= table.bottom() - 0.01, "after {after}, table at {y}: at {t}, table ends {}", table.bottom());
+        }
+    }
+}
+
+/// Word for Mac (exact 12 pt lines, 8 pt after the paragraph, a full-width table placed on the page
+/// after it in the document, at the line's bottom plus its space after or a twip either side):
+/// before Word 2013 layout a table touching the space after moves the line below it, as a twip
+/// higher does, and a twip lower leaves it; in Word 2013 layout, where only the line counts, it
+/// stays. The same with the table first in the document (#3977); a shape touching the space after
+/// leaves the line in place.
+#[test]
+fn a_floating_table_touching_the_space_after_of_a_line_before_it_moves_that_line_below_it() {
+    let paras = || vec![spaced("P1", 0.0), spaced("P2", 8.0), spaced("P3", 0.0), spaced("P4", 0.0)];
+    let square = |y: f32| Float { wrap: Wrap::Square, h_rel: Anchor::Page, v_rel: Anchor::Page, y, ..Default::default() };
+    for mode in [11, 12, 14, 15] {
+        for twips in [-1, 0, 1] {
+            let y = 114.0 + twips as f32 / 20.0;
+            for case in ["table first", "table after", "shape"] {
+                let mut d = match case {
+                    "table first" => spaced_doc(paras(), 0, float_table(612.0, 50.0, on_page(y))),
+                    "table after" => spaced_doc(paras(), 2, float_table(612.0, 50.0, on_page(y))),
+                    _ => {
+                        let mut d = pinned("");
+                        d.body = paras().into_iter().map(wordcraft_doc::para_block).collect();
+                        d.insert_object(&Pos::body(3, 0), rect_shape(612.0, 50.0, square(y)), &Default::default()).unwrap();
+                        d
+                    }
+                };
+                d.settings.compat_mode = mode;
+                let l = lay(&d);
+                let float = match case {
+                    "table first" => table_rect(&l, 0, 0),
+                    "table after" => table_rect(&l, 0, 2),
+                    _ => shapes(&l.pages[0].items).first().copied(),
+                };
+                let float = float.unwrap_or_else(|| panic!("mode {mode} {case} {twips}: no float"));
+                assert!((float.y - y).abs() < 0.001, "mode {mode} {case} {twips}: the float stays put: {float:?}");
+                let p2 = if case == "table first" { 2 } else { 1 };
+                let moves = mode < 15 && (twips < 0 || (twips == 0 && case != "shape"));
+                let expected = if moves { float.bottom() } else { 89.0 };
+                assert!((top(&l, 0, p2) - expected).abs() < 0.001, "mode {mode} {case} {twips}: P2 at {}, expected {expected}", top(&l, 0, p2));
+            }
+        }
+    }
+}
+
+/// An exact 12 pt line from 72 pt with 8 pt after, its paragraph mark far taller (62.5 pt) or
+/// smaller (4 pt) than the line, below a full-width floating table placed first in the document:
+/// the table is checked against the line's 12 pt (#3977), so before Word 2013 layout a table
+/// reaching the line's space after (from 92 pt down, contact included) moves the line below it
+/// whatever the mark's height; one a twip lower, or no space after, leaves it.
+#[test]
+fn a_table_reaching_the_space_after_of_an_exact_line_moves_it_whatever_its_marks_height() {
+    use wordcraft_doc::props::LineSpacing;
+    for mode in [11, 12, 14, 15] {
+        for mark in [4.0, 62.5] {
+            for (after, y) in [(8.0, 88.0), (8.0, 92.0), (8.0, 92.05), (0.0, 88.0), (0.0, 84.05)] {
+                let ch = CharProps { font: Some(TEST_FONT.into()), size: Some(11.0), ..Default::default() };
+                let mut p = Paragraph::with_text("P1", ch.clone());
+                p.mark = CharProps { size: Some(mark), ..ch };
+                p.props.line_spacing = Some(LineSpacing::Exactly(12.0));
+                p.props.space_before = Some(0.0);
+                p.props.space_after = Some(after);
+                let mut d = spaced_doc(vec![p, spaced("After", 0.0)], 0, float_table(612.0, 50.0, on_page(y)));
+                d.settings.compat_mode = mode;
+                let l = lay(&d);
+                let table = table_rect(&l, 0, 0).unwrap();
+                let case = format!("mode {mode}, mark {mark}, {after} after, table at {y}");
+                assert!((table.y - y).abs() < 0.001, "{case}: the table stays put: {table:?}");
+                let moves = mode < 15 && after > 0.0 && y <= 92.0;
+                let expected = if moves { table.bottom() } else { 72.0 };
+                assert!((top(&l, 0, 1) - expected).abs() < 0.001, "{case}: the line at {}, expected {expected}", top(&l, 0, 1));
+            }
         }
     }
 }
@@ -1528,6 +1646,35 @@ fn a_word_moving_down_a_split_row_steps_at_most_2000_rows_beside_one_object() {
     d.insert_object(&Pos::body(0, 0), rect_shape(308.0, 3970.0, float), &Default::default()).unwrap();
     let ls = word_lines(&lay(&d), 0);
     assert!(ls.first().is_some_and(|l| (l.0 - 4010.0).abs() < 0.01 && (l.1 - 72.0).abs() < 0.01 && !l.3), "{ls:?}");
+}
+
+/// As above with the shape 1970 pt high (to 2010 pt): after 2000 rows the word goes straight below
+/// it, at 2010 pt, also with a taller shape (to 4010 pt) standing in the right margin, outside the
+/// text, which no row of the word meets.
+#[test]
+fn a_word_moving_down_a_split_row_goes_below_the_object_beside_it_not_one_in_the_margin() {
+    assert_w_widths();
+    use wordcraft_doc::props::LineSpacing;
+    let beside = Float { wrap: Wrap::Square, h_rel: Anchor::Margin, v_rel: Anchor::Page, x: 60.0, y: 40.0, ..Default::default() };
+    let margin = Float { wrap: Wrap::Square, h_rel: Anchor::Page, v_rel: Anchor::Page, x: 550.0, y: 40.0, ..Default::default() };
+    let first_line = |in_margin: bool| {
+        let mut p = sized(W12, 0.0);
+        p.props.line_spacing = Some(LineSpacing::Exactly(0.7));
+        let mut d = pinned("");
+        d.body = vec![wordcraft_doc::para_block(p)];
+        d.last_section.page_h = 4100.0;
+        d.insert_object(&Pos::body(0, 0), rect_shape(308.0, 1970.0, beside.clone()), &Default::default()).unwrap();
+        if in_margin {
+            d.insert_object(&Pos::body(0, 0), rect_shape(20.0, 3970.0, margin.clone()), &Default::default()).unwrap();
+        }
+        let l = lay(&d);
+        assert_eq!(shapes(&l.pages[0].items).len(), if in_margin { 2 } else { 1 });
+        word_lines(&l, 0).first().copied()
+    };
+    let alone = first_line(false);
+    assert!(alone.is_some_and(|l| (l.0 - 2010.0).abs() < 0.01 && (l.1 - 72.0).abs() < 0.01 && !l.3), "{alone:?}");
+    let with_margin = first_line(true);
+    assert_eq!(with_margin, alone, "the shape in the margin moves the word");
 }
 
 fn multiple(text: &str, m: f32) -> Paragraph {
