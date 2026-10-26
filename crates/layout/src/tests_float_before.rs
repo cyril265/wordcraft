@@ -808,6 +808,48 @@ fn a_last_line_whose_space_after_reaches_a_floating_table_goes_below_it() {
     }
 }
 
+/// Word for Mac (exact 12 pt lines, 8 pt after the paragraph, a full-width table placed on the page
+/// after it in the document, at the line's bottom plus its space after or a twip either side):
+/// before Word 2013 layout a table touching the space after moves the line below it, as a twip
+/// higher does, and a twip lower leaves it; in Word 2013 layout, where only the line counts, it
+/// stays. The same with the table first in the document (#3977); a shape touching the space after
+/// leaves the line in place.
+#[test]
+fn a_floating_table_touching_the_space_after_of_a_line_before_it_moves_that_line_below_it() {
+    let paras = || vec![spaced("P1", 0.0), spaced("P2", 8.0), spaced("P3", 0.0), spaced("P4", 0.0)];
+    let square = |y: f32| Float { wrap: Wrap::Square, h_rel: Anchor::Page, v_rel: Anchor::Page, y, ..Default::default() };
+    for mode in [11, 12, 14, 15] {
+        for twips in [-1, 0, 1] {
+            let y = 114.0 + twips as f32 / 20.0;
+            for case in ["table first", "table after", "shape"] {
+                let mut d = match case {
+                    "table first" => spaced_doc(paras(), 0, float_table(612.0, 50.0, on_page(y))),
+                    "table after" => spaced_doc(paras(), 2, float_table(612.0, 50.0, on_page(y))),
+                    _ => {
+                        let mut d = pinned("");
+                        d.body = paras().into_iter().map(wordcraft_doc::para_block).collect();
+                        d.insert_object(&Pos::body(3, 0), rect_shape(612.0, 50.0, square(y)), &Default::default()).unwrap();
+                        d
+                    }
+                };
+                d.settings.compat_mode = mode;
+                let l = lay(&d);
+                let float = match case {
+                    "table first" => table_rect(&l, 0, 0),
+                    "table after" => table_rect(&l, 0, 2),
+                    _ => shapes(&l.pages[0].items).first().copied(),
+                };
+                let float = float.unwrap_or_else(|| panic!("mode {mode} {case} {twips}: no float"));
+                assert!((float.y - y).abs() < 0.001, "mode {mode} {case} {twips}: the float stays put: {float:?}");
+                let p2 = if case == "table first" { 2 } else { 1 };
+                let moves = mode < 15 && (twips < 0 || (twips == 0 && case != "shape"));
+                let expected = if moves { float.bottom() } else { 89.0 };
+                assert!((top(&l, 0, p2) - expected).abs() < 0.001, "mode {mode} {case} {twips}: P2 at {}, expected {expected}", top(&l, 0, p2));
+            }
+        }
+    }
+}
+
 #[test]
 fn only_the_last_line_of_a_paragraph_keeps_its_space_after_clear() {
     // Word: a two-line paragraph (72–89–106, 8 pt after) and a table at 110: the first line stays,
