@@ -2167,9 +2167,11 @@ fn break_lines(pl: &mut ParaLayout, env: &ParaEnv, mark_style: u32, level: Optio
     let mut skipped = 0;
     // A left tab past the right indent that wrapped to start the next line.
     let mut wrapped_tab: Option<usize> = None;
-    // The height a row is checked against floating objects with, when a line laid out on it
-    // turned out taller than estimated (see `need`), and how many times it was laid out again.
+    // The heights a row is checked against floating objects and floating tables with, when a line
+    // laid out on it turned out taller than estimated (see `need`), and how many times it was laid
+    // out again.
     let mut row_need = 0.0f32;
+    let mut row_need_table = 0.0f32;
     let mut retries = 0usize;
     // The left edge the current row's spans were found from (`None`: the row isn't beside or
     // above a floating object).
@@ -2194,7 +2196,7 @@ fn break_lines(pl: &mut ParaLayout, env: &ParaEnv, mark_style: u32, level: Optio
                     lo = first_left.max(rp.indent_left) + dw;
                 }
                 row_lo_used = Some(lo);
-                match row_spans(exclusions, top, est_clear.max(row_need), table_clear.max(row_need), lo, base_right)
+                match row_spans(exclusions, top, est_clear.max(row_need), table_clear.max(row_need_table), lo, base_right)
                     .map(|mut spans| (spans.pop_front(), spans))
                 {
                     Ok((Some((a, b)), rest)) => {
@@ -2702,12 +2704,12 @@ fn break_lines(pl: &mut ParaLayout, env: &ParaEnv, mark_style: u32, level: Optio
         // A row too low for one of its lines is laid out again from its start: beside or below
         // the objects in the way of the taller row (Word moves the whole row).
         let need = clear + if j >= n && end == LineEnd::Para { env.wrap_after.max(0.0) } else { 0.0 };
-        let checked = est_clear.max(row_need);
+        let checked = (est_clear.max(row_need), table_clear.max(row_need_table));
         if let Some(lo) = row_lo_used
-            && need > checked + 0.01
+            && (need > checked.0 + 0.01 || need > checked.1 + 0.01)
             && retries < 8
-            && row_spans(exclusions, top, need, need, lo, base_right)
-                != row_spans(exclusions, top, checked, table_clear.max(row_need), lo, base_right)
+            && row_spans(exclusions, top, need.max(checked.0), need.max(checked.1), lo, base_right)
+                != row_spans(exclusions, top, checked.0, checked.1, lo, base_right)
         {
             let restart = lines.get(row_first).map_or(c0, |l| l.c0);
             lines.truncate(row_first);
@@ -2717,7 +2719,7 @@ fn break_lines(pl: &mut ParaLayout, env: &ParaEnv, mark_style: u32, level: Optio
             }
             i = restart;
             skipped = 0;
-            row_need = need;
+            (row_need, row_need_table) = (row_need.max(need), row_need_table.max(need));
             retries += 1;
             row_rest.clear();
             continue;
@@ -2760,7 +2762,7 @@ fn break_lines(pl: &mut ParaLayout, env: &ParaEnv, mark_style: u32, level: Optio
         }
         if row_rest.is_empty() {
             top += even_row(lines.get_mut(row_first..).unwrap_or_default());
-            (row_need, retries, row_lo_used) = (0.0, 0, None);
+            (row_need, row_need_table, retries, row_lo_used) = (0.0, 0.0, 0, None);
         }
         if i >= n {
             // A paragraph ending with a line break gets an empty last line.

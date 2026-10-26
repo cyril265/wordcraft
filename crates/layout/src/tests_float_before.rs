@@ -850,6 +850,37 @@ fn a_floating_table_touching_the_space_after_of_a_line_before_it_moves_that_line
     }
 }
 
+/// An exact 12 pt line from 72 pt with 8 pt after, its paragraph mark far taller (62.5 pt) or
+/// smaller (4 pt) than the line, below a full-width floating table placed first in the document:
+/// the table is checked against the line's 12 pt (#3977), so before Word 2013 layout a table
+/// reaching the line's space after (from 92 pt down, contact included) moves the line below it
+/// whatever the mark's height; one a twip lower, or no space after, leaves it.
+#[test]
+fn a_table_reaching_the_space_after_of_an_exact_line_moves_it_whatever_its_marks_height() {
+    use wordcraft_doc::props::LineSpacing;
+    for mode in [11, 12, 14, 15] {
+        for mark in [4.0, 62.5] {
+            for (after, y) in [(8.0, 88.0), (8.0, 92.0), (8.0, 92.05), (0.0, 88.0), (0.0, 84.05)] {
+                let ch = CharProps { font: Some(TEST_FONT.into()), size: Some(11.0), ..Default::default() };
+                let mut p = Paragraph::with_text("P1", ch.clone());
+                p.mark = CharProps { size: Some(mark), ..ch };
+                p.props.line_spacing = Some(LineSpacing::Exactly(12.0));
+                p.props.space_before = Some(0.0);
+                p.props.space_after = Some(after);
+                let mut d = spaced_doc(vec![p, spaced("After", 0.0)], 0, float_table(612.0, 50.0, on_page(y)));
+                d.settings.compat_mode = mode;
+                let l = lay(&d);
+                let table = table_rect(&l, 0, 0).unwrap();
+                let case = format!("mode {mode}, mark {mark}, {after} after, table at {y}");
+                assert!((table.y - y).abs() < 0.001, "{case}: the table stays put: {table:?}");
+                let moves = mode < 15 && after > 0.0 && y <= 92.0;
+                let expected = if moves { table.bottom() } else { 72.0 };
+                assert!((top(&l, 0, 1) - expected).abs() < 0.001, "{case}: the line at {}, expected {expected}", top(&l, 0, 1));
+            }
+        }
+    }
+}
+
 #[test]
 fn only_the_last_line_of_a_paragraph_keeps_its_space_after_clear() {
     // Word: a two-line paragraph (72–89–106, 8 pt after) and a table at 110: the first line stays,
