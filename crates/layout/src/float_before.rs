@@ -56,9 +56,10 @@ pub(crate) struct PlacedFloat {
     pub rects: Vec<(usize, Rect)>,
     /// The areas the text keeps clear of around it.
     pub areas: Vec<WrapArea>,
-    /// A table placed from the text (anchored to it, or with no vertical offset): a line before it
-    /// whose bottom touches its top stays where it is (Word), as it doesn't for a table placed on
-    /// the page or margin ([`reaches`]).
+    /// A table placed from the text (any vertical anchor but the page or margin, or no vertical
+    /// offset, as `place_floating_table` places it): a line before it whose bottom touches its top
+    /// stays where it is (Word), as it doesn't for a table placed on the page or margin
+    /// ([`reaches`]).
     pub from_text: bool,
 }
 

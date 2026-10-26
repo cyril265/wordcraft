@@ -4887,7 +4887,7 @@ fn place_floating_table(
             page: pb.pages.len().saturating_sub(1),
             rects: vec![(0, r)],
             areas: vec![wrap],
-            from_text: v_rel == Anchor::Paragraph,
+            from_text: !matches!(v_rel, Anchor::Page | Anchor::Margin),
         });
     }
     None
