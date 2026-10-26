@@ -809,8 +809,8 @@ fn east_asian(c: char) -> bool {
 
 /// One face for a run in a Thai font that isn't installed (#1549): Word substitutes one font
 /// (Cordia New) for the whole run, so the Latin letters, digits and ฿ keep the Thai letters' face
-/// and size. `None` unless `font` is a Thai family, it was substituted, and its substitute
-/// `primary` lacks some of the run's Thai or Latin characters; then the first face covering all of
+/// and size. `None` unless `font` is a Thai family, it was substituted (or drawn in its font
+/// table alternate), and its stand-in `primary` lacks some of the run's Thai or Latin characters; then the first face covering all of
 /// them, if one does. Other families keep Latin text in their own substitute, as Word does.
 pub(crate) fn thai_run_face(font: &str, substituted: bool, primary: FaceRef, text: &str, bold: bool, italic: bool) -> Option<FaceRef> {
     if !substituted || !wordcraft_fonts::word::is_thai_family(font) {
@@ -953,7 +953,11 @@ impl<'a> Builder<'a> {
         // Complex-script characters (Persian, Arabic…) use the run's complex-script font, size,
         // bold and italic.
         let rc_cs: Option<Arc<ResolvedChar>> = text.chars().any(|c| rc.uses_complex(c)).then(|| Arc::new(rc.complex()));
-        let resolved = wordcraft_fonts::word::resolve(lookup_family(self.env.doc, &rc.font), rc.bold, rc.italic);
+        let family = lookup_family(self.env.doc, &rc.font);
+        let resolved = wordcraft_fonts::word::resolve(family, rc.bold, rc.italic);
+        // The run's font is missing when it was substituted, or when another family stands in for
+        // it: its font table alternate, which may itself be installed.
+        let requested_missing = resolved.substituted || !family.eq_ignore_ascii_case(&rc.font);
         let primary = resolved.face;
         // Symbol-font characters are laid out as their Unicode equivalents.
         let sym = SymbolRun::of(&rc.font, &resolved);
@@ -979,7 +983,7 @@ impl<'a> Builder<'a> {
         // A missing Thai font: one face for the run's Thai and Latin text (#1549). A run with its
         // own complex-script font keeps that font for the Thai letters.
         let run_face: Option<FaceRef> = if primary_cs.is_none_or(|f| f.id() == primary.id()) {
-            thai_run_face(&rc.font, resolved.substituted, primary, text, rc.bold, rc.italic)
+            thai_run_face(&rc.font, requested_missing, primary, text, rc.bold, rc.italic)
         } else {
             None
         };
