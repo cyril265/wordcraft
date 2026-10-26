@@ -69,7 +69,7 @@ impl PlacedFloat {
             let Some(o) = p.objects.get(*oi) else { continue };
             let Some((_, _, float)) = floating(o) else { continue };
             let outline = ctx.wrap_outline(o);
-            areas.extend(wrap_area(*r, float, outline.as_deref().map(|v| v.as_slice())));
+            areas.extend(wrap_area(*r, float, outline.as_deref().map(Vec::as_slice)));
         }
         (!areas.is_empty()).then_some(PlacedFloat { block, page, rects, areas })
     }
