@@ -644,7 +644,7 @@ Footer page-table height and body wrapping are corrected. Other pagination gaps 
 
 | Date | Change | Summary |
 |---|---|---|
-| 2026-10-22 | trivial | Progress log: objects in headers, footers and cells placed above their paragraph's space before |
+| 2026-10-22 | trivial | Progress log: objects in headers, footers and cells placed above their paragraph's space before, line-relative ones too (the 2026-10-23 review follow-up had kept those at the text top) |
 | 2026-10-22 | trivial | Progress log: one native window per open document |
 | 2026-10-22 | trivial | Progress log: every open document keeps its own recovery copy |
 | 2026-10-22 | trivial | Progress log: several open documents in the desktop window |

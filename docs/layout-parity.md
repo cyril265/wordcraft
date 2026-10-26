@@ -266,7 +266,7 @@ layout suite are pending; this is not a new Word/native-IME acceptance claim.
 
 | Date | Change | Summary |
 |---|---|---|
-| 2026-10-22 | trivial | Objects in headers, footers and table cells placed relative to their paragraph or line start above its space before, as in Word; line-relative ones too, measured in Word for Mac, no longer from the text top |
+| 2026-10-22 | trivial | Objects in headers, footers and table cells placed relative to their paragraph or line start above its space before, as in Word, no longer from the text top; line-relative ones too (measured in Word for Mac), which the 2026-10-23 review follow-up had kept at the text top |
 | 2026-10-25 | trivial | Arabic list labels: `arabicAlpha` and `arabicAbjad` draw the 28 Arabic letters (alphabetical and abjad order), doubling past the last letter; Hebrew, Hindi, Thai and Vietnamese still show decimal (`doc::section::tests::arabic_letters_count_in_both_orders`) |
 | 2026-10-24 | trivial | Preserve grapheme edit/wrap boundaries across independently drawn font/style pieces; original emoji regression retained, new mixed-style/bundled-font LTR/bidi controls pending managed validation |
 | 2026-10-24 | trivial | Exact-spacing table contact uses the specified line height in row selection and word skipping; large/small mark regressions in modes 11/12/14/15 (#3977); shape estimates unchanged |
