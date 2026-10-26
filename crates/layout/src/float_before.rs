@@ -56,6 +56,10 @@ pub(crate) struct PlacedFloat {
     pub rects: Vec<(usize, Rect)>,
     /// The areas the text keeps clear of around it.
     pub areas: Vec<WrapArea>,
+    /// A table placed from the text (anchored to it, or with no vertical offset): a line before it
+    /// whose bottom touches its top stays where it is (Word), as it doesn't for a table placed on
+    /// the page or margin ([`reaches`]).
+    pub from_text: bool,
 }
 
 impl PlacedFloat {
@@ -71,7 +75,7 @@ impl PlacedFloat {
             let outline = ctx.wrap_outline(o);
             areas.extend(wrap_area(*r, float, outline.as_deref().map(Vec::as_slice)));
         }
-        (!areas.is_empty()).then_some(PlacedFloat { block, page, rects, areas })
+        (!areas.is_empty()).then_some(PlacedFloat { block, page, rects, areas, from_text: false })
     }
 }
 
@@ -147,9 +151,18 @@ fn is_table(doc: &Document, block: usize) -> bool {
     matches!(doc.body.get(block).map(|b| &**b), Some(Block::Table(_)))
 }
 
-/// The body blocks before `before` with lines on `page` that one of `areas` lands on, a
-/// paragraph's last line with its space after.
-fn covered<'p>(ctx: &'p Ctx, page: &'p Page, areas: &'p [WrapArea], before: usize) -> impl Iterator<Item = usize> + 'p {
+/// Whether a line at `r` runs into wrap area `area`: overlapping it, or, with `contact`, touching
+/// the top of a floating table's with its bottom (#3977; measured in Word for tables placed on the
+/// page, before or after the line in the document, not for tables placed from the text).
+fn reaches(r: &Rect, area: &WrapArea, contact: bool) -> bool {
+    let (a, table) = (area.0, area.4 && contact);
+    let top = if table { a.y <= r.bottom() } else { a.y < r.bottom() };
+    r.x < a.right() && a.x < r.right() && r.y < a.bottom() && top
+}
+
+/// The body blocks before `before` with lines on `page` that one of `areas` lands on ([`reaches`],
+/// with `contact`), a paragraph's last line with its space after.
+fn covered<'p>(ctx: &'p Ctx, page: &'p Page, (areas, contact): (&'p [WrapArea], bool), before: usize) -> impl Iterator<Item = usize> + 'p {
     page.items.iter().filter_map(move |it| {
         let Placed::Lines { story: StoryRef::Body, path, para, l0, l1, x, y, .. } = it else { return None };
         let block = usize::try_from(*path.0.first()?).ok()?;
@@ -170,7 +183,7 @@ fn covered<'p>(ctx: &'p Ctx, page: &'p Page, areas: &'p [WrapArea], before: usiz
             .any(|(k, l)| {
                 let h = l.height + if k == last { after } else { 0.0 };
                 let r = Rect::new(x + l.left, y + l.top - first, (l.right - l.left).max(1.0), h);
-                areas.iter().any(|(area, ..)| r.intersects(area))
+                areas.iter().any(|area| reaches(&r, area, contact))
             })
             .then_some(block)
     })
@@ -180,7 +193,7 @@ fn covered<'p>(ctx: &'p Ctx, page: &'p Page, areas: &'p [WrapArea], before: usiz
 /// with its space after, from `kept_from` on (the first block whose state is kept; the lines of
 /// the floating tables placed there don't count).
 fn first_covered(ctx: &Ctx, page: &Page, placed: &PlacedFloat, (floats, kept_from): (&[PlacedFloat], usize)) -> Option<usize> {
-    covered(ctx, page, &placed.areas, placed.block)
+    covered(ctx, page, (&placed.areas, !placed.from_text), placed.block)
         .filter(|block| *block >= kept_from && !(is_table(ctx.doc, *block) && floats.iter().any(|f| f.block == *block)))
         .min()
 }
@@ -190,7 +203,7 @@ fn first_covered(ctx: &Ctx, page: &Page, placed: &PlacedFloat, (floats, kept_fro
 /// an earlier section's on the page (the walk restarts at a section) or a block's that started more
 /// than a page back. The lines of floating tables don't count.
 pub(crate) fn text_under(ctx: &Ctx, page: &Page, before: usize, area: &WrapArea) -> bool {
-    covered(ctx, page, std::slice::from_ref(area), before)
+    covered(ctx, page, (std::slice::from_ref(area), true), before)
         .any(|b| !matches!(ctx.doc.body.get(b).map(|b| &**b), Some(Block::Table(t)) if t.props.float.is_some()))
 }
 

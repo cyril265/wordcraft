@@ -263,6 +263,51 @@ fn exact_and_at_least_lines_keep_their_whole_height_clear_of_a_float_before_or_a
     }
 }
 
+/// Word for Mac (exact 12 pt lines, a full-width table or square-wrapped shape whose top is at
+/// the bottom of the second line or a twip either side, compatibility modes 12 and 15): a table
+/// touching the line's bottom moves the line below it, whether the table comes before the line in
+/// the document (#3977) or after it; a shape touching it leaves it in place, and so does a table
+/// placed from the text, here one line up from where it comes in the document (the line before
+/// that, which it overlaps, moves below it). So the text before a table placed on the page is laid
+/// out again for a table touching one of its lines, and not for a shape or a table placed from the
+/// text.
+#[test]
+fn a_floating_table_touching_the_bottom_of_a_line_before_it_moves_that_line_below_it() {
+    let text = "P1\nP2\nP3\nP4";
+    let square = |y: f32| Float { wrap: Wrap::Square, h_rel: Anchor::Page, v_rel: Anchor::Page, y, ..Default::default() };
+    for mode in [11, 12, 14, 15] {
+        for twips in [-1, 0, 1] {
+            let y = 106.0 + twips as f32 / 20.0;
+            for (case, at) in [("table first", 0), ("table after", 2), ("shape", 3)] {
+                let mut d = if case == "shape" {
+                    doc_with_shape(text, at, 612.0, 50.0, square(y))
+                } else {
+                    doc_with_table(text, at, float_table(612.0, 50.0, on_page(y)))
+                };
+                d.settings.compat_mode = mode;
+                let l = lay(&d);
+                let float = if case == "shape" { shapes(&l.pages[0].items).first().copied() } else { table_rect(&l, 0, at as u32) };
+                let float = float.unwrap_or_else(|| panic!("mode {mode} {case} {twips}: no float"));
+                assert!((float.y - y).abs() < 0.001, "mode {mode} {case} {twips}: the float stays put: {float:?}");
+                let (p1, p2) = if at == 0 { (1, 2) } else { (0, 1) };
+                assert!((top(&l, 0, p1) - 72.0).abs() < 0.001, "mode {mode} {case} {twips}: P1 at {}", top(&l, 0, p1));
+                let moves = twips < 0 || (twips == 0 && case != "shape");
+                let expected = if moves { float.bottom() } else { 89.0 };
+                assert!((top(&l, 0, p2) - expected).abs() < 0.001, "mode {mode} {case} {twips}: P2 at {}, expected {expected}", top(&l, 0, p2));
+            }
+            let from_text = TableFloat { v_rel: Anchor::Paragraph, ..on_page(y - 106.0 - 17.0) };
+            let mut d = doc_with_table(text, 2, float_table(612.0, 50.0, from_text));
+            d.settings.compat_mode = mode;
+            let l = lay(&d);
+            let table = table_rect(&l, 0, 2).unwrap_or_else(|| panic!("mode {mode} from text {twips}: no table"));
+            assert!((table.y - (y - 17.0)).abs() < 0.001, "mode {mode} from text {twips}: the table stays put: {table:?}");
+            let expected = if twips < 0 { table.bottom() } else { 72.0 };
+            assert!((top(&l, 0, 0) - expected).abs() < 0.001, "mode {mode} from text {twips}: P1 at {}, expected {expected}", top(&l, 0, 0));
+            assert!(top(&l, 0, 1) >= table.bottom() - 0.001, "mode {mode} from text {twips}: P2 at {}", top(&l, 0, 1));
+        }
+    }
+}
+
 #[test]
 fn a_paragraph_before_a_narrow_floating_table_wraps_beside_it() {
     // Word: a table half the text wide at the left margin; the paragraph before it runs beside it
