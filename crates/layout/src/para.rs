@@ -2157,9 +2157,8 @@ fn break_lines(pl: &mut ParaLayout, env: &ParaEnv, mark_style: u32, level: Optio
     let mut row_steps: (Option<f32>, usize) = (None, 0);
     // The current row has more than one span (text on both sides of a floating object).
     let mut row_multi = false;
-    // The heights a row is checked against floating objects and floating tables with, when a line
-    // laid out on it turned out taller than estimated (see `need`), and how many times it was laid
-    // out again.
+    // The height a row is checked against floating objects with, when a line laid out on it
+    // turned out taller than estimated (see `need`), and how many times it was laid out again.
     let mut row_need = 0.0f32;
     let mut row_need_table = 0.0f32;
     let mut retries = 0usize;
