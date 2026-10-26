@@ -252,9 +252,9 @@ fn exact_and_at_least_lines_keep_their_whole_height_clear_of_a_float_before_or_a
 /// touching the line's bottom moves the line below it, whether the table comes before the line in
 /// the document (#3977) or after it; a shape touching it leaves it in place, and so does a table
 /// placed from the text, here one line up from where it comes in the document (the line before
-/// that, which it overlaps, moves below it). So the text before a table placed on the page is laid
-/// out again for a table touching one of its lines, and not for a shape or a table placed from the
-/// text.
+/// that, which it overlaps, moves below it). So the text before a table placed on the page or
+/// margin is laid out again for a table touching one of its lines, and not for a shape or a table
+/// placed from the text: any vertical anchor other than the page or margin, as placement takes it.
 #[test]
 fn a_floating_table_touching_the_bottom_of_a_line_before_it_moves_that_line_below_it() {
     let text = "P1\nP2\nP3\nP4";
@@ -262,11 +262,19 @@ fn a_floating_table_touching_the_bottom_of_a_line_before_it_moves_that_line_belo
     for mode in [11, 12, 14, 15] {
         for twips in [-1, 0, 1] {
             let y = 106.0 + twips as f32 / 20.0;
-            for (case, at) in [("table first", 0), ("table after", 2), ("shape", 3)] {
+            let on_margin = TableFloat { v_rel: Anchor::Margin, ..on_page(y - 72.0) };
+            let column_across = TableFloat { h_rel: Anchor::Column, ..on_page(y) };
+            for (case, at, table) in [
+                ("table first", 0, on_page(y)),
+                ("table after", 2, on_page(y)),
+                ("table after, on the margin", 2, on_margin),
+                ("table after, across from the column", 2, column_across),
+                ("shape", 3, on_page(y)),
+            ] {
                 let mut d = if case == "shape" {
                     doc_with_shape(text, at, 612.0, 50.0, square(y))
                 } else {
-                    doc_with_table(text, at, float_table(612.0, 50.0, on_page(y)))
+                    doc_with_table(text, at, float_table(612.0, 50.0, table))
                 };
                 d.settings.compat_mode = mode;
                 let l = lay(&d);
@@ -279,15 +287,29 @@ fn a_floating_table_touching_the_bottom_of_a_line_before_it_moves_that_line_belo
                 let expected = if moves { float.bottom() } else { 89.0 };
                 assert!((top(&l, 0, p2) - expected).abs() < 0.001, "mode {mode} {case} {twips}: P2 at {}, expected {expected}", top(&l, 0, p2));
             }
-            let from_text = TableFloat { v_rel: Anchor::Paragraph, ..on_page(y - 106.0 - 17.0) };
-            let mut d = doc_with_table(text, 2, float_table(612.0, 50.0, from_text));
-            d.settings.compat_mode = mode;
-            let l = lay(&d);
-            let table = table_rect(&l, 0, 2).unwrap_or_else(|| panic!("mode {mode} from text {twips}: no table"));
-            assert!((table.y - (y - 17.0)).abs() < 0.001, "mode {mode} from text {twips}: the table stays put: {table:?}");
-            let expected = if twips < 0 { table.bottom() } else { 72.0 };
-            assert!((top(&l, 0, 0) - expected).abs() < 0.001, "mode {mode} from text {twips}: P1 at {}, expected {expected}", top(&l, 0, 0));
-            assert!(top(&l, 0, 1) >= table.bottom() - 0.001, "mode {mode} from text {twips}: P2 at {}", top(&l, 0, 1));
+            for v_rel in [
+                Anchor::Paragraph,
+                Anchor::Line,
+                Anchor::Column,
+                Anchor::Character,
+                Anchor::TopMargin,
+                Anchor::BottomMargin,
+                Anchor::LeftMargin,
+                Anchor::RightMargin,
+                Anchor::InsideMargin,
+                Anchor::OutsideMargin,
+            ] {
+                let from_text = TableFloat { v_rel, ..on_page(y - 106.0 - 17.0) };
+                let mut d = doc_with_table(text, 2, float_table(612.0, 50.0, from_text));
+                d.settings.compat_mode = mode;
+                let l = lay(&d);
+                let case = format!("mode {mode} from text ({v_rel:?}) {twips}");
+                let table = table_rect(&l, 0, 2).unwrap_or_else(|| panic!("{case}: no table"));
+                assert!((table.y - (y - 17.0)).abs() < 0.001, "{case}: the table stays put: {table:?}");
+                let expected = if twips < 0 { table.bottom() } else { 72.0 };
+                assert!((top(&l, 0, 0) - expected).abs() < 0.001, "{case}: P1 at {}, expected {expected}", top(&l, 0, 0));
+                assert!(top(&l, 0, 1) >= table.bottom() - 0.001, "{case}: P2 at {}", top(&l, 0, 1));
+            }
         }
     }
 }
