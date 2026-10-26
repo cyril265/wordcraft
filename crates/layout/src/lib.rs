@@ -4891,7 +4891,13 @@ fn place_floating_table(
             pb.excl.push(wrap.clone());
         }
         pb.float_tables.push(area);
-        return Some(float_before::PlacedFloat { block, page: pb.pages.len().saturating_sub(1), rects: vec![(0, r)], areas: vec![wrap] });
+        return Some(float_before::PlacedFloat {
+            block,
+            page: pb.pages.len().saturating_sub(1),
+            rects: vec![(0, r)],
+            areas: vec![wrap],
+            from_text: v_rel == Anchor::Paragraph,
+        });
     }
     None
 }
