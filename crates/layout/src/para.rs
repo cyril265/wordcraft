@@ -2478,11 +2478,9 @@ fn break_lines(pl: &mut ParaLayout, env: &ParaEnv, mark_style: u32, level: Optio
                         LineSpacing::AtLeast(v) if v.is_finite() => v.max(est_h.max(row_need)),
                         _ => est_h.max(row_need),
                     };
-                    let lowest = exclusions
-                        .iter()
-                        .filter(|e| e.intersects_row(top, est_h, table_h, f32::NEG_INFINITY, f32::INFINITY))
-                        .map(|e| e.bottom)
-                        .fold(top, f32::max);
+                    let row_lo = row_lo_used.unwrap_or(if first { first_left } else { rp.indent_left });
+                    let lowest =
+                        exclusions.iter().filter(|e| e.intersects_row(top, est_h, table_h, row_lo, base_right)).map(|e| e.bottom).fold(top, f32::max);
                     if row_steps.0 != Some(lowest) {
                         row_steps = (Some(lowest), 0);
                     }

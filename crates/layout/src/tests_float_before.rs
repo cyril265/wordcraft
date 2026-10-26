@@ -1648,6 +1648,35 @@ fn a_word_moving_down_a_split_row_steps_at_most_2000_rows_beside_one_object() {
     assert!(ls.first().is_some_and(|l| (l.0 - 4010.0).abs() < 0.01 && (l.1 - 72.0).abs() < 0.01 && !l.3), "{ls:?}");
 }
 
+/// As above with the shape 1970 pt high (to 2010 pt): after 2000 rows the word goes straight below
+/// it, at 2010 pt, also with a taller shape (to 4010 pt) standing in the right margin, outside the
+/// text, which no row of the word meets.
+#[test]
+fn a_word_moving_down_a_split_row_goes_below_the_object_beside_it_not_one_in_the_margin() {
+    assert_w_widths();
+    use wordcraft_doc::props::LineSpacing;
+    let beside = Float { wrap: Wrap::Square, h_rel: Anchor::Margin, v_rel: Anchor::Page, x: 60.0, y: 40.0, ..Default::default() };
+    let margin = Float { wrap: Wrap::Square, h_rel: Anchor::Page, v_rel: Anchor::Page, x: 550.0, y: 40.0, ..Default::default() };
+    let first_line = |in_margin: bool| {
+        let mut p = sized(W12, 0.0);
+        p.props.line_spacing = Some(LineSpacing::Exactly(0.7));
+        let mut d = pinned("");
+        d.body = vec![wordcraft_doc::para_block(p)];
+        d.last_section.page_h = 4100.0;
+        d.insert_object(&Pos::body(0, 0), rect_shape(308.0, 1970.0, beside.clone()), &Default::default()).unwrap();
+        if in_margin {
+            d.insert_object(&Pos::body(0, 0), rect_shape(20.0, 3970.0, margin.clone()), &Default::default()).unwrap();
+        }
+        let l = lay(&d);
+        assert_eq!(shapes(&l.pages[0].items).len(), if in_margin { 2 } else { 1 });
+        word_lines(&l, 0).first().copied()
+    };
+    let alone = first_line(false);
+    assert!(alone.is_some_and(|l| (l.0 - 2010.0).abs() < 0.01 && (l.1 - 72.0).abs() < 0.01 && !l.3), "{alone:?}");
+    let with_margin = first_line(true);
+    assert_eq!(with_margin, alone, "the shape in the margin moves the word");
+}
+
 fn multiple(text: &str, m: f32) -> Paragraph {
     use wordcraft_doc::props::LineSpacing;
     let mut p = spaced(text, 0.0);
